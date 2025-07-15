@@ -1,4 +1,4 @@
-# bot.py (Version 5 - Dual API with Fallback)
+# bot.py (Version 5.1 - Language Fix)
 
 import os
 import logging
@@ -9,7 +9,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 # --- Configuration ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
-OMDB_API_KEY = os.environ.get("OMDB_API_KEY") # Our new fallback key
+OMDB_API_KEY = os.environ.get("OMDB_API_KEY")
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -19,13 +19,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# --- NEW: Helper function to search using TMDB ---
+# --- MODIFIED: search_tmdb function with language fix ---
 async def search_tmdb(query: str) -> dict | None:
     """Searches TMDB and returns a dictionary of movie data, or None if not found."""
     logger.info(f"Searching TMDB for: {query}")
     try:
         headers = {"accept": "application/json", "Authorization": f"Bearer {TMDB_API_KEY}"}
-        search_url = f"https://api.themoviedb.org/3/search/movie?query={query}&include_adult=false&language=en-US&page=1"
+        
+        # --- THE FIX IS HERE ---
+        # We REMOVED '&language=en-US' from this search URL to make it find more international movies.
+        search_url = f"https://api.themoviedb.org/3/search/movie?query={query}&include_adult=false&page=1"
         
         response = requests.get(search_url, headers=headers)
         response.raise_for_status()
@@ -35,12 +38,13 @@ async def search_tmdb(query: str) -> dict | None:
             return None
 
         movie_id = search_data["results"][0]["id"]
+        
+        # We KEEP '&language=en-US' here so the details (like genre) are in English.
         details_url = f"https://api.themoviedb.org/3/movie/{movie_id}?language=en-US"
         details_response = requests.get(details_url, headers=headers)
         details_response.raise_for_status()
         data = details_response.json()
 
-        # Prepare a standardized data dictionary
         return {
             "source": "TMDB",
             "title": data.get("title", "N/A"),
@@ -57,7 +61,7 @@ async def search_tmdb(query: str) -> dict | None:
         return None
 
 
-# --- NEW: Helper function to search using OMDb ---
+# --- OMDb function remains unchanged ---
 async def search_omdb(query: str) -> dict | None:
     """Searches OMDb and returns a dictionary of movie data, or None if not found."""
     logger.info(f"Falling back to OMDb for: {query}")
@@ -70,7 +74,6 @@ async def search_omdb(query: str) -> dict | None:
         if data.get("Response") != "True":
             return None
 
-        # Prepare a standardized data dictionary
         return {
             "source": "OMDb",
             "title": data.get("Title", "N/A"),
@@ -87,23 +90,19 @@ async def search_omdb(query: str) -> dict | None:
         return None
 
 
-# --- MODIFIED: Main handler that orchestrates the search ---
+# --- Orchestrator function remains unchanged ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.message.text
     
-    # Step 1: Try searching TMDB first
     media_data = await search_tmdb(query)
     
-    # Step 2: If TMDB fails, fall back to OMDb
     if not media_data:
         media_data = await search_omdb(query)
         
-    # Step 3: If both fail, send an error message
     if not media_data:
         await update.message.reply_text("😞 Sorry, I couldn't find that movie on any of my databases.")
         return
         
-    # Step 4: If either search succeeds, build and send the reply
     caption = (
         f"🎬 *{media_data['title']}*\n\n"
         f"⭐ *Rating:* {media_data['rating']}\n"
@@ -113,14 +112,12 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"📅 *Release Date:* {media_data['release_date']}"
     )
     
-    # Create button if a URL exists
     reply_markup = None
     if media_data.get('button_url'):
         button_text = f"More Info on {media_data['source']}"
         keyboard = [[InlineKeyboardButton(button_text, url=media_data['button_url'])]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Send the final message
     if media_data.get('poster_url'):
         await update.message.reply_photo(
             photo=media_data['poster_url'],
@@ -135,7 +132,7 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             reply_markup=reply_markup
         )
 
-# --- Unchanged start and error handlers ---
+# --- Start and error handlers remain unchanged ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     await update.message.reply_text(f"Hi {user.first_name}! 🍿\n\nI search multiple databases to find movie info for you. Just send me a title!")
@@ -144,7 +141,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.warning('Update "%s" caused error "%s"', update, context.error)
 
 
-# --- Unchanged main function ---
+# --- Main function remains unchanged ---
 def main() -> None:
     if not all([TELEGRAM_TOKEN, TMDB_API_KEY, OMDB_API_KEY]):
         logger.error("One or more API keys are missing from environment variables!")
