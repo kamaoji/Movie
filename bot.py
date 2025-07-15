@@ -1,13 +1,13 @@
-# bot.py (Version 2 with TMDB API)
+# bot.py (Version 3 - Modern, Async)
 
 import os
 import logging
 import requests
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # --- Configuration ---
-# Get your new TMDB token from your hosting environment variables
+# These are the same environment variables.
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY") # This is your v4 Read Access Token
 
@@ -18,57 +18,54 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# --- Bot Command Handlers (Now using async/await) ---
 
-# --- Bot Command Handlers ---
-
-def start(update: Update, context: CallbackContext) -> None:
+# All handler functions must now be 'async'
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message for the /start command."""
     user = update.effective_user
     welcome_message = (
         f"Hi {user.first_name}! 🍿\n\n"
-        "I'm your upgraded Movie Info Bot, now powered by TMDB!\n\n"
-        "Send me the name of any movie or TV show to get started. For example: `Blade Runner 2049`"
+        "I am your modern Movie Info Bot, powered by TMDB!\n\n"
+        "Just send me the name of any movie or TV show to get started."
     )
-    update.message.reply_text(welcome_message)
+    # Every reply is now an 'await' call
+    await update.message.reply_text(welcome_message)
 
-def error_handler(update: Update, context: CallbackContext) -> None:
-    """Logs errors."""
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Logs errors caused by updates."""
     logger.warning('Update "%s" caused error "%s"', update, context.error)
 
-def search_media(update: Update, context: CallbackContext) -> None:
-    """Search for media (movie or TV) on TMDB and reply with the details."""
+async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Search for media on TMDB and reply with the details."""
     query = update.message.text
     
-    # Define the headers for TMDB API v4 authentication
     headers = {
         "accept": "application/json",
         "Authorization": f"Bearer {TMDB_API_KEY}"
     }
     
-    # --- Part 1: Search for the movie to get its ID ---
     search_url = f"https://api.themoviedb.org/3/search/movie?query={query}&include_adult=false&language=en-US&page=1"
     
     try:
+        # Note: requests is a synchronous library. For high-performance bots,
+        # an async library like httpx would be used, but for this bot, requests is fine.
         response = requests.get(search_url, headers=headers)
         response.raise_for_status()
         search_data = response.json()
 
         if not search_data.get("results"):
-            update.message.reply_text("😞 Sorry, I couldn't find any movie with that name. Please check the spelling.")
+            await update.message.reply_text("😞 Sorry, I couldn't find any movie with that name. Please check the spelling.")
             return
 
-        # Get the top result from the search
         top_result = search_data["results"][0]
-        
-        # --- Part 2: Use the ID to get detailed information ---
         movie_id = top_result["id"]
-        details_url = f"https://api.themoviedb.org/3/movie/{movie_id}?language=en-US"
         
+        details_url = f"https://api.themoviedb.org/3/movie/{movie_id}?language=en-US"
         details_response = requests.get(details_url, headers=headers)
         details_response.raise_for_status()
         data = details_response.json()
 
-        # Extract movie details
         title = data.get("title", "N/A")
         tagline = data.get("tagline")
         overview = data.get("overview", "No plot summary available.")
@@ -78,7 +75,6 @@ def search_media(update: Update, context: CallbackContext) -> None:
         runtime = data.get("runtime", 0)
         poster_path = data.get("poster_path")
 
-        # Format runtime from minutes to hours and minutes
         if runtime:
             hours = runtime // 60
             minutes = runtime % 60
@@ -86,10 +82,8 @@ def search_media(update: Update, context: CallbackContext) -> None:
         else:
             runtime_formatted = "N/A"
             
-        # Create the image URL
         poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
         
-        # Create the message caption
         caption = (
             f"🎬 *{title}*\n"
             f"_{tagline}_\n\n"
@@ -102,22 +96,21 @@ def search_media(update: Update, context: CallbackContext) -> None:
             f"📅 *Release Date:* {release_date}\n"
         )
         
-        # Send the message
         if poster_url:
-            update.message.reply_photo(
+            await update.message.reply_photo(
                 photo=poster_url,
                 caption=caption,
                 parse_mode='Markdown'
             )
         else:
-            update.message.reply_text(caption, parse_mode='Markdown')
+            await update.message.reply_text(caption, parse_mode='Markdown')
 
     except requests.exceptions.RequestException as e:
         logger.error(f"API request failed: {e}")
-        update.message.reply_text("Sorry, I'm having trouble connecting to the movie database.")
+        await update.message.reply_text("Sorry, I'm having trouble connecting to the movie database.")
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}")
-        update.message.reply_text("An unexpected error occurred. Please try again later.")
+        await update.message.reply_text("An unexpected error occurred. Please try again later.")
 
 
 # --- Main Function to Run the Bot ---
@@ -130,22 +123,32 @@ def main() -> None:
         logger.error("TMDB_API_KEY environment variable not set!")
         return
 
-    updater = Updater(TELEGRAM_TOKEN)
-    dispatcher = updater.dispatcher
+    # The new way to build the bot application
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, search_media))
-    dispatcher.add_error_handler(error_handler)
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_media))
+    application.add_error_handler(error_handler)
 
     # For hosting on Render (Webhook)
-    PORT = int(os.environ.get('PORT', '8443'))
-    updater.start_webhook(listen="0.0.0.0",
-                          port=PORT,
-                          url_path=TELEGRAM_TOKEN,
-                          webhook_url=f"https://your-app-name.onrender.com/{TELEGRAM_TOKEN}")
-                          
-    logger.info("Bot has started with TMDB integration!")
-    updater.idle()
+    PORT = int(os.environ.get('PORT', 8443))
+    
+    # We get the app name from Render's environment variables
+    # This makes the webhook URL dynamic and easier to manage
+    APP_NAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+    if not APP_NAME:
+        logger.error("RENDER_EXTERNAL_HOSTNAME environment variable not set!")
+        return
+    
+    # The run_webhook method is part of the main 'run' loop
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TELEGRAM_TOKEN,
+        webhook_url=f"https://{APP_NAME}/{TELEGRAM_TOKEN}"
+    )
+
 
 if __name__ == '__main__':
     main()
