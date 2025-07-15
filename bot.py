@@ -1,4 +1,4 @@
-# bot.py (Upgraded with Inline Keyboard and Welcome Image)
+# bot.py (Final version with reliable file_id and full functionality)
 
 import os
 import logging
@@ -10,8 +10,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 OMDB_API_KEY = os.environ.get("OMDB_API_KEY")
 
-# NEW: URL for our welcome image
-WELCOME_IMAGE_URL = "https://i.postimg.cc/L6QyTqVd/popcorn-cart.png"
+# IMPORTANT: Replace this placeholder with the actual file_id you got from your bot.
+WELCOME_IMAGE_FILE_ID = "https://t.me/DESIARUNGAMERS/68" 
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -24,19 +24,18 @@ logger = logging.getLogger(__name__)
 
 # --- Bot Command and Message Handlers ---
 
-# MODIFIED: The start command is now much more impressive!
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message with a photo and inline buttons."""
     user = update.effective_user
     
-    # NEW: Create the inline keyboard buttons
+    # Create the inline keyboard buttons
     keyboard = [
         [InlineKeyboardButton("🔍 SEARCH MOVIES OR SERIES 🔍", callback_data="search_prompt")],
         [InlineKeyboardButton("📤 SHARE NOW 📤", switch_inline_query="Check out this awesome movie bot!")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # NEW: The welcome message text
+    # The welcome message text
     welcome_message = (
         f"Hey 👋 {user.first_name}!\n\n"
         "🍿 WELCOME TO THE MOVIE INFO ENGINE! 🍿\n\n"
@@ -44,14 +43,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Press the button below or just send me a name!"
     )
     
-    # NEW: Send a photo with the caption and buttons
+    # Send a photo using the super-reliable file_id
     await update.message.reply_photo(
-        photo=WELCOME_IMAGE_URL,
+        photo=WELCOME_IMAGE_FILE_ID,
         caption=welcome_message,
         reply_markup=reply_markup
     )
 
-# NEW: A function to handle the button clicks (callback queries)
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Parses the CallbackQuery and runs the appropriate action."""
     query = update.callback_query
@@ -60,7 +58,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if query.data == "search_prompt":
         await query.message.reply_text("Great! Send me the name of the movie or series you want to search for.")
 
-# The search_movie function remains the same as before
 async def search_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Searches for the movie on OMDb and replies with the details."""
     movie_title = update.message.text
@@ -79,6 +76,8 @@ async def search_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             imdb_rating = data.get("imdbRating", "N/A")
             genre = data.get("Genre", "N/A")
 
+            # Use MarkdownV2 for better formatting control, but escape special characters
+            # For simplicity, we'll stick to basic Markdown which is less strict.
             caption = (
                 f"🎬 *{title}* ({year})\n\n"
                 f"_{plot}_\n\n"
@@ -102,8 +101,8 @@ async def search_movie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.error(f"API request failed: {e}")
         await update.message.reply_text("Sorry, I can't reach the movie database right now.")
 
-# The error handler remains the same
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log Errors caused by Updates."""
     logger.error('Update "%s" caused error "%s"', update, context.error)
 
 
@@ -111,22 +110,24 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 def main() -> None:
     """Start the bot."""
     if not TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN environment variable not set!")
+        logger.error("FATAL: TELEGRAM_TOKEN environment variable not set!")
         return
     if not OMDB_API_KEY:
-        logger.error("OMDB_API_KEY environment variable not set!")
+        logger.error("FATAL: OMDB_API_KEY environment variable not set!")
+        return
+    if "PASTE_YOUR_FILE_ID_HERE" in WELCOME_IMAGE_FILE_ID:
+        logger.error("FATAL: Please replace 'PASTE_YOUR_FILE_ID_HERE' in bot.py with your actual file_id.")
         return
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     # Register handlers
     application.add_handler(CommandHandler("start", start))
-    # NEW: Add the handler for our buttons
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_movie))
     application.add_error_handler(error_handler)
 
-    # Webhook setup for Render remains the same
+    # Webhook setup for Render
     PORT = int(os.environ.get('PORT', 8443))
     WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL')
     if WEBHOOK_URL:
@@ -138,7 +139,7 @@ def main() -> None:
             webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
         )
     else:
-        logger.info("Starting bot in polling mode")
+        logger.info("Starting bot in polling mode for local testing")
         application.run_polling()
 
 if __name__ == '__main__':
