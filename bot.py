@@ -1,4 +1,4 @@
-# bot.py (Version 11 - Robust Indexing & Matched Post Style)
+# bot.py (Version 12 - Final Bug Fix & Clean Formatting)
 
 import os
 import logging
@@ -7,7 +7,7 @@ import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
-# --- Configuration & Logging (Unchanged) ---
+# --- Configuration & Logging ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 PRIVATE_CHANNEL_ID = os.environ.get("PRIVATE_CHANNEL_ID")
@@ -15,17 +15,17 @@ PRIVATE_CHANNEL_ID = os.environ.get("PRIVATE_CHANNEL_ID")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- In-Memory Index (Unchanged) ---
+# --- In-Memory Index ---
 movie_index = {}
 
-# --- Language and Button Data (Unchanged) ---
+# --- Language and Button Data ---
 LANGUAGE_DATA = {
     'en': {'name': 'English', 'region': 'US'}, 'hi': {'name': 'Hindi', 'region': 'IN'},
     'ta': {'name': 'Tamil', 'region': 'IN'}, 'te': {'name': 'Telugu', 'region': 'IN'},
     'es': {'name': 'Spanish', 'region': 'ES'}, 'fr': {'name': 'French', 'region': 'FR'},
 }
 
-# --- Button Keyboard Helpers (Unchanged) ---
+# --- Button Keyboard Helpers ---
 def get_main_menu_keyboard():
     keyboard = [[InlineKeyboardButton("🇮🇳 Hindi", callback_data='lang_hi'), InlineKeyboardButton("🇬🇧 English", callback_data='lang_en')], [InlineKeyboardButton("More Languages 🌍", callback_data='show_more_langs')]]
     return InlineKeyboardMarkup(keyboard)
@@ -34,7 +34,7 @@ def get_more_languages_keyboard():
     keyboard = [[InlineKeyboardButton("Tamil", callback_data='lang_ta'), InlineKeyboardButton("Telugu", callback_data='lang_te')], [InlineKeyboardButton("Spanish", callback_data='lang_es'), InlineKeyboardButton("French", callback_data='lang_fr')], [InlineKeyboardButton("« Back", callback_data='back_to_main')]]
     return InlineKeyboardMarkup(keyboard)
 
-# --- Start and Button Handlers (Unchanged) ---
+# --- Start and Button Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     welcome_message = f"Hey {user.first_name}! 👋 Welcome to the Ultimate Movie Bot! 🎬\n\nI can now search my own private library for you!\n\nChoose your preferred language below to get tailored results! 👇"
@@ -54,17 +54,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lang_name = LANGUAGE_DATA.get(lang_code, {}).get('name', 'selected language')
         await query.edit_message_text(text=f"✅ Great! Your preferred language is set to *{lang_name}*.\n\nNow, send me any movie title to search!", parse_mode='Markdown')
 
-# --- MODIFIED: Indexing function with a robust regex ---
+# --- Indexing function with robust regex ---
 async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # This function is now correct from the previous version
     if not update.channel_post or str(update.channel_post.chat.id) != PRIVATE_CHANNEL_ID: return
     caption = update.channel_post.caption
     if not caption: return
-
-    # --- BUG FIX: Use a more robust regex to find title and language ---
-    # This regex finds text after "#Title" until the next newline.
     title_match = re.search(r'#Title\s+([^\n]+)', caption, re.IGNORECASE)
     lang_match = re.search(r'#Lang\s+([a-zA-Z]{2})', caption, re.IGNORECASE)
-
     if title_match and lang_match:
         title = title_match.group(1).strip().lower()
         lang = lang_match.group(1).strip().lower()
@@ -88,15 +85,15 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     tmdb_data = await search_tmdb(query, region=region, lang_code=user_lang_code)
 
     if tmdb_data:
-        # --- NEW FEATURE: Format TMDB posts to match your channel style ---
+        # --- NEW & FIXED: Format TMDB posts to your desired style ---
         caption = (
-            f"#Title {tmdb_data['title']}\n\n" # Add the #Title tag
+            f"🎬 *{tmdb_data['title']}*\n\n"
             f"⭐ *TMDB Rating:* {tmdb_data['rating']}\n"
             f"🎭 *Genre:* {tmdb_data['genre']}\n"
-            # Add the #Lang tag next to the language
-            f"🌐 *Language:* {tmdb_data['language']} #Lang {user_lang_code or 'en'}\n" 
+            f"🌐 *Language:* {tmdb_data['language']}\n"
             f"🕒 *Runtime:* {tmdb_data['runtime']}\n"
-            f"📅 *Release Date:* {tm_data['release_date']}"
+            # BUG FIX: Use the correct variable name 'tmdb_data' here
+            f"📅 *Release Date:* {tmdb_data['release_date']}"
         )
         
         reply_markup = None
@@ -127,9 +124,8 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # --- Step 3: If all fails ---
     await update.message.reply_text("Movie not found in TMDB or my private library for the selected language.")
 
-# --- search_tmdb function (Unchanged from Version 8) ---
+# --- search_tmdb function (Unchanged) ---
 async def search_tmdb(query: str, region: str | None = None, lang_code: str | None = None) -> dict | None:
-    # This function remains the same, with strict language filtering.
     try:
         headers = {"accept": "application/json", "Authorization": f"Bearer {TMDB_API_KEY}"}
         search_url = f"https://api.themoviedb.org/3/search/movie?query={query}&include_adult=false&language=en-US&page=1"
