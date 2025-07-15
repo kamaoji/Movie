@@ -1,4 +1,4 @@
-# bot.py (Version 10 - Private Channel as a Database)
+# bot.py (Version 11 - Robust Indexing & Matched Post Style)
 
 import os
 import logging
@@ -7,21 +7,15 @@ import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
-# --- Configuration ---
+# --- Configuration & Logging (Unchanged) ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
-PRIVATE_CHANNEL_ID = os.environ.get("PRIVATE_CHANNEL_ID") # The ID of your private channel
+PRIVATE_CHANNEL_ID = os.environ.get("PRIVATE_CHANNEL_ID")
 
-# --- Logging Setup ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- In-Memory Index ---
-# This dictionary will store our movie index.
-# Format: {"title_lang": message_id} e.g., {"baaghi_hi": 123}
+# --- In-Memory Index (Unchanged) ---
 movie_index = {}
 
 # --- Language and Button Data (Unchanged) ---
@@ -60,52 +54,50 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lang_name = LANGUAGE_DATA.get(lang_code, {}).get('name', 'selected language')
         await query.edit_message_text(text=f"✅ Great! Your preferred language is set to *{lang_name}*.\n\nNow, send me any movie title to search!", parse_mode='Markdown')
 
-# --- NEW: Function to listen to the private channel and update the index ---
+# --- MODIFIED: Indexing function with a robust regex ---
 async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # We only care about messages from our specific private channel
-    if str(update.channel_post.chat.id) != PRIVATE_CHANNEL_ID:
-        return
-
+    if not update.channel_post or str(update.channel_post.chat.id) != PRIVATE_CHANNEL_ID: return
     caption = update.channel_post.caption
-    if not caption:
-        return
+    if not caption: return
 
-    # Use regex to find our hashtags
-    title_match = re.search(r'#Title\s+(.+?)(?=\s+#|$)', caption, re.IGNORECASE)
+    # --- BUG FIX: Use a more robust regex to find title and language ---
+    # This regex finds text after "#Title" until the next newline.
+    title_match = re.search(r'#Title\s+([^\n]+)', caption, re.IGNORECASE)
     lang_match = re.search(r'#Lang\s+([a-zA-Z]{2})', caption, re.IGNORECASE)
 
     if title_match and lang_match:
         title = title_match.group(1).strip().lower()
         lang = lang_match.group(1).strip().lower()
         message_id = update.channel_post.message_id
-
-        # Create a unique key for our index
         index_key = f"{title}_{lang}"
         movie_index[index_key] = message_id
-        
-        logger.info(f"Indexed movie: Key='{index_key}', Message ID='{message_id}'")
-        # Optional: React to the post in the channel to show it was indexed
-        await context.bot.add_reaction(chat_id=PRIVATE_CHANNEL_ID, message_id=message_id, reaction="👍")
+        logger.info(f"Successfully Indexed: Key='{index_key}', Message ID='{message_id}'")
+        try:
+            await context.bot.add_reaction(chat_id=PRIVATE_CHANNEL_ID, message_id=message_id, reaction="👍")
+        except Exception as e:
+            logger.warning(f"Could not react to message (check permissions): {e}")
 
-
-# --- MODIFIED: The main search function now uses the index as a fallback ---
+# --- Main search function ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.message.text.lower().strip() # Use lowercase for consistent searching
+    query = update.message.text.lower().strip()
     user_id = update.effective_user.id
     user_lang_code = context.user_data.get('language')
 
-    # --- Step 1: Try TMDB first ---
+    # --- Step 1: Try TMDB ---
     region = LANGUAGE_DATA.get(user_lang_code, {}).get('region') if user_lang_code else None
     tmdb_data = await search_tmdb(query, region=region, lang_code=user_lang_code)
 
     if tmdb_data:
-        # If found on TMDB, send the TMDB info
-        caption = (f"🎬 *{tmdb_data['title']}*\n\n"
-                   f"⭐ *{tmdb_data['source']} Rating:* {tmdb_data['rating']}\n"
-                   f"🎭 *Genre:* {tmdb_data['genre']}\n"
-                   f"🌐 *Language:* {tmdb_data['language']}\n"
-                   f"🕒 *Runtime:* {tmdb_data['runtime']}\n"
-                   f"📅 *Release Date:* {tmdb_data['release_date']}")
+        # --- NEW FEATURE: Format TMDB posts to match your channel style ---
+        caption = (
+            f"#Title {tmdb_data['title']}\n\n" # Add the #Title tag
+            f"⭐ *TMDB Rating:* {tmdb_data['rating']}\n"
+            f"🎭 *Genre:* {tmdb_data['genre']}\n"
+            # Add the #Lang tag next to the language
+            f"🌐 *Language:* {tmdb_data['language']} #Lang {user_lang_code or 'en'}\n" 
+            f"🕒 *Runtime:* {tmdb_data['runtime']}\n"
+            f"📅 *Release Date:* {tm_data['release_date']}"
+        )
         
         reply_markup = None
         if tmdb_data.get('button_url'):
@@ -118,33 +110,26 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=reply_markup)
         return
 
-    # --- Step 2: If TMDB fails, search our private channel index ---
+    # --- Step 2: Search private index ---
     if user_lang_code:
         index_key = f"{query}_{user_lang_code}"
         message_id_to_forward = movie_index.get(index_key)
-
         if message_id_to_forward:
-            logger.info(f"Found movie in private index! Key: '{index_key}', Forwarding message ID: {message_id_to_forward}")
+            logger.info(f"Found in private index! Forwarding message ID: {message_id_to_forward}")
             try:
-                await context.bot.forward_message(
-                    chat_id=user_id,
-                    from_chat_id=PRIVATE_CHANNEL_ID,
-                    message_id=message_id_to_forward
-                )
-                return # Success!
+                await context.bot.forward_message(chat_id=user_id, from_chat_id=PRIVATE_CHANNEL_ID, message_id=message_id_to_forward)
+                return
             except Exception as e:
                 logger.error(f"Failed to forward message: {e}")
-                await update.message.reply_text("I found the movie in my library, but couldn't forward it. Please check my admin permissions in the channel.")
+                await update.message.reply_text("I found the movie, but couldn't forward it. Check my admin permissions.")
                 return
 
-    # --- Step 3: If both fail, send the final error message ---
+    # --- Step 3: If all fails ---
     await update.message.reply_text("Movie not found in TMDB or my private library for the selected language.")
 
-
-# --- search_tmdb function (Unchanged) ---
+# --- search_tmdb function (Unchanged from Version 8) ---
 async def search_tmdb(query: str, region: str | None = None, lang_code: str | None = None) -> dict | None:
-    # This function is unchanged from the previous version.
-    # It performs the strict language search on TMDB.
+    # This function remains the same, with strict language filtering.
     try:
         headers = {"accept": "application/json", "Authorization": f"Bearer {TMDB_API_KEY}"}
         search_url = f"https://api.themoviedb.org/3/search/movie?query={query}&include_adult=false&language=en-US&page=1"
@@ -170,33 +155,25 @@ async def search_tmdb(query: str, region: str | None = None, lang_code: str | No
         logger.error(f"TMDB search failed: {e}")
         return None
 
-# --- Error Handler (Unchanged) ---
+# --- Error Handler & Main function (Unchanged) ---
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.warning('Update "%s" caused error "%s"', update, context.error)
 
-# --- MODIFIED: main function now includes the channel post handler ---
 def main() -> None:
     if not all([TELEGRAM_TOKEN, TMDB_API_KEY, PRIVATE_CHANNEL_ID]):
         logger.error("One or more required environment variables are missing!")
         return
-
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # Add all handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
-    # NEW: This handler listens for new posts in channels your bot is in
     application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, update_index))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_media))
     application.add_error_handler(error_handler)
-
-    # Webhook setup is unchanged
     PORT = int(os.environ.get('PORT', 8443))
     APP_NAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
     if not APP_NAME:
         logger.error("RENDER_EXTERNAL_HOSTNAME environment variable not set!")
         return
-    
     application.run_webhook(listen="0.0.0.0", port=PORT, url_path=TELEGRAM_TOKEN, webhook_url=f"https://{APP_NAME}/{TELEGRAM_TOKEN}")
 
 if __name__ == '__main__':
