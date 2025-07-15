@@ -1,4 +1,4 @@
-# bot.py (Version 4.2: Corrected Filter Instance Usage)
+# bot.py (Version 4.3: Corrected Document Filter Name)
 
 import os
 import logging
@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 # --- Bot Logic ---
 
-# 1. Force Subscribe and Membership Check
 async def check_user_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user = update.effective_user
     if not user: return False
@@ -35,7 +34,6 @@ async def check_user_membership(update: Update, context: ContextTypes.DEFAULT_TY
         return False
 
 async def force_subscribe_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, handler_func):
-    # Determine the message object to reply to
     message_to_reply = update.message or (update.callback_query.message if update.callback_query else None)
     if not message_to_reply: return
     
@@ -46,11 +44,9 @@ async def force_subscribe_wrapper(update: Update, context: ContextTypes.DEFAULT_
         keyboard = [[InlineKeyboardButton("📢 JOIN CHANNEL 📢", url=channel_link)], [InlineKeyboardButton("🔄 Try Again 🔄", callback_data="check_join")]]
         await message_to_reply.reply_text("❗*Please join our Updates Channel to use this bot\\.*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
 
-# 2. File Indexing (Listens to the Database Channel)
 async def file_indexer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.channel_post
     if not message: return
-
     file = message.document or message.video or message.audio
     if file:
         file_name = file.file_name
@@ -62,13 +58,13 @@ async def file_indexer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception as e:
             logger.warning(f"Could not reply in DB channel: {e}")
 
-# 3. User-Facing Commands
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await force_subscribe_wrapper(update, context, start_action)
 
 async def start_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    message = update.message or update.callback_query.message
+    message = update.message or (update.callback_query and update.callback_query.message)
+    if not message: return
     keyboard = [[InlineKeyboardButton("🔍 Search Files 🔍", callback_data="search_prompt")]]
     await message.reply_photo(
         photo=WELCOME_IMAGE_FILE_ID,
@@ -83,11 +79,9 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def search_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.message.text.lower()
     results = {name: fid for name, fid in file_db.items() if query in name.lower()}
-    
     if not results:
         await update.message.reply_text("😞 No files found matching your query.")
         return
-
     context.user_data['search_results'] = list(results.items())
     context.user_data['search_query'] = query
     await display_search_results(update, context, page=0)
@@ -103,7 +97,6 @@ async def display_search_results(update: Update, context: ContextTypes.DEFAULT_T
     keyboard = []
     for name, file_id in page_items:
         keyboard.append([InlineKeyboardButton(f"🎬 {name[:40]}", callback_data=f"sendfile_{file_id}")])
-
     nav_row = []
     if page > 0: nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"page_{page-1}"))
     if end_index < len(results): nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"page_{page+1}"))
@@ -121,7 +114,6 @@ async def display_search_results(update: Update, context: ContextTypes.DEFAULT_T
         else:
             if update.callback_query: await update.callback_query.answer()
 
-# 4. Button and Callback Handler
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -147,9 +139,9 @@ def main() -> None:
     allowed_updates = [UpdateType.MESSAGE, UpdateType.CALLBACK_QUERY, UpdateType.CHANNEL_POST]
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # THE FIX IS HERE: Using all-caps filter instances
+    # THE FIX IS HERE: Using filters.Document.ALL instead of filters.DOCUMENT
     application.add_handler(MessageHandler(
-        filters.Chat(chat_id=int(DB_CHANNEL_ID)) & (filters.DOCUMENT | filters.VIDEO | filters.AUDIO), 
+        filters.Chat(chat_id=int(DB_CHANNEL_ID)) & (filters.Document.ALL | filters.VIDEO | filters.AUDIO), 
         file_indexer
     ))
     
