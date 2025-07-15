@@ -1,165 +1,157 @@
-# bot.py (Version 4.3: Corrected Document Filter Name)
+# bot.py (Version 4: The Complete Professional Bot)
 
 import os
 import logging
+import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from telegram.constants import ParseMode, UpdateType
+from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden
 
 # --- Configuration from Environment Variables ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-UPDATES_CHANNEL = os.environ.get("UPDATES_CHANNEL")
-DB_CHANNEL_ID = os.environ.get("DB_CHANNEL_ID")
+OMDB_API_KEY = os.environ.get("OMDB_API_KEY")
+UPDATES_CHANNEL = os.environ.get("UPDATES_CHANNEL") # Your PUBLIC channel (e.g., @mychannel)
+DATABASE_CHANNEL_ID = os.environ.get("DATABASE_CHANNEL_ID") # Your PRIVATE channel ID (e.g., -1001...)
 WELCOME_IMAGE_FILE_ID = os.environ.get("WELCOME_IMAGE_FILE_ID")
-
-# --- In-Memory Database ---
-file_db = {}
 
 # --- Logging Setup ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# --- Bot Logic ---
+# --- Simple "Database" Mapping ---
+# This maps a movie's IMDb ID to a Message ID in your DATABASE_CHANNEL_ID
+# You must manually find the Message ID for each file you post in your private channel.
+# To find a message ID, forward the message to a bot like @userinfobot
+FILE_MAP = {
+    "tt0133093": 2,  # Example: The Matrix -> Message ID 2 in your database channel
+    "tt1375666": 3,  # Example: Inception -> Message ID 3
+    "tt0468569": 4,  # Example: The Dark Knight -> Message ID 4
+    # Add more movies here...
+}
+
+# --- Middleware & Handlers ---
 
 async def check_user_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    user = update.effective_user
-    if not user: return False
+    """Checks if a user is a member of the required channel."""
+    if not UPDATES_CHANNEL: return True
+    user_id = update.effective_user.id
     try:
-        member = await context.bot.get_chat_member(chat_id=UPDATES_CHANNEL, user_id=user.id)
+        member = await context.bot.get_chat_member(chat_id=UPDATES_CHANNEL, user_id=user_id)
         return member.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]
     except (BadRequest, Forbidden):
-        logger.error(f"Error checking membership for {user.id} in {UPDATES_CHANNEL}. Is bot an admin?")
-        return False
+        logger.error(f"Error checking membership for {user_id} in {UPDATES_CHANNEL}. Bot might not be admin.", exc_info=True)
+        return False # Fail safely
 
 async def force_subscribe_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, handler_func):
-    message_to_reply = update.message or (update.callback_query.message if update.callback_query else None)
-    if not message_to_reply: return
-    
+    """Wrapper that enforces channel subscription before executing a command."""
     if await check_user_membership(update, context):
         await handler_func(update, context)
     else:
         channel_link = f"https://t.me/{UPDATES_CHANNEL.lstrip('@')}"
-        keyboard = [[InlineKeyboardButton("📢 JOIN CHANNEL 📢", url=channel_link)], [InlineKeyboardButton("🔄 Try Again 🔄", callback_data="check_join")]]
-        await message_to_reply.reply_text("❗*Please join our Updates Channel to use this bot\\.*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
+        keyboard = [[InlineKeyboardButton("📢 JOIN CHANNEL 📢", url=channel_link)], [InlineKeyboardButton("🔄 Retry 🔄", callback_data="check_join")]]
+        await update.effective_message.reply_text(
+            "**You must join our channel to use this bot\\!**\n\nPlease join and click Retry\\.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
 
-async def file_indexer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.channel_post
-    if not message: return
-    file = message.document or message.video or message.audio
-    if file:
-        file_name = file.file_name
-        file_id = file.file_id
-        file_db[file_name] = file_id
-        logger.info(f"Indexed file: {file_name} with ID: {file_id}")
-        try:
-            await message.reply_text(f"✅ Indexed: `{file_name}`", parse_mode=ParseMode.MARKDOWN_V2)
-        except Exception as e:
-            logger.warning(f"Could not reply in DB channel: {e}")
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await force_subscribe_wrapper(update, context, start_action)
 
-async def start_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    message = update.message or (update.callback_query and update.callback_query.message)
-    if not message: return
-    keyboard = [[InlineKeyboardButton("🔍 Search Files 🔍", callback_data="search_prompt")]]
-    await message.reply_photo(
+async def start_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """The actual start command logic."""
+    keyboard = [[InlineKeyboardButton("🔍 Search Movies", switch_inline_query_current_chat="")]]
+    await update.effective_message.reply_photo(
         photo=WELCOME_IMAGE_FILE_ID,
-        caption=f"Hey {user.first_name}\\!\n\nWelcome to the File Search Bot\\. Use the button or just send me a name to search for\\.",
+        caption=f"Welcome, {update.effective_user.first_name}\\!\n\nUse the button below to search for a movie\\.",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
-async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await force_subscribe_wrapper(update, context, search_action)
 
-async def search_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.message.text.lower()
-    results = {name: fid for name, fid in file_db.items() if query in name.lower()}
-    if not results:
-        await update.message.reply_text("😞 No files found matching your query.")
-        return
-    context.user_data['search_results'] = list(results.items())
-    context.user_data['search_query'] = query
-    await display_search_results(update, context, page=0)
-
-async def display_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int):
-    results = context.user_data.get('search_results', [])
-    query = context.user_data.get('search_query', 'your query')
-    items_per_page = 5
-    start_index = page * items_per_page
-    end_index = start_index + items_per_page
-    page_items = results[start_index:end_index]
-    
-    keyboard = []
-    for name, file_id in page_items:
-        keyboard.append([InlineKeyboardButton(f"🎬 {name[:40]}", callback_data=f"sendfile_{file_id}")])
-    nav_row = []
-    if page > 0: nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"page_{page-1}"))
-    if end_index < len(results): nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"page_{page+1}"))
-    if nav_row: keyboard.append(nav_row)
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    text = f"Found *{len(results)}* files for '_{query.replace('.', '\\.')}_':"
-    
-    effective_message = update.callback_query.message if update.callback_query else update.message
+async def search_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles text messages to search for movies."""
+    query = update.message.text
+    api_url = f"http://www.omdbapi.com/?apikey={OMDB_API_KEY}&s={query}"
     try:
-        await effective_message.edit_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
-    except BadRequest as e:
-        if "Message is not modified" not in str(e):
-             await effective_message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
+        response = requests.get(api_url)
+        data = response.json()
+        if data.get("Response") == "True":
+            results = data.get("Search", [])
+            keyboard = []
+            for movie in results[:5]: # Show top 5 results
+                button = InlineKeyboardButton(
+                    f"🎬 {movie['Title']} ({movie['Year']})",
+                    callback_data=f"select_{movie['imdbID']}"
+                )
+                keyboard.append([button])
+            if keyboard:
+                await update.message.reply_text("Here's what I found:", reply_markup=InlineKeyboardMarkup(keyboard))
+            else:
+                await update.message.reply_text("No results found.")
         else:
-            if update.callback_query: await update.callback_query.answer()
+            await update.message.reply_text("Couldn't find that movie. Please try another title.")
+    except Exception as e:
+        logger.error("Error during movie search", exc_info=True)
+        await update.message.reply_text("Sorry, an error occurred during search.")
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles all inline button clicks."""
     query = update.callback_query
     await query.answer()
     data = query.data
 
     if data == "check_join":
-        await force_subscribe_wrapper(query, context, start_action)
-    elif data == "search_prompt":
-        await query.message.reply_text("Please send the name of the file you want to find.")
-    elif data.startswith("page_"):
-        page = int(data.split("_")[1])
-        await display_search_results(update, context, page=page)
-    elif data.startswith("sendfile_"):
-        file_id = data.split("_", 1)[1]
-        await context.bot.send_document(chat_id=query.from_user.id, document=file_id, caption="Here is your file!")
+        if await check_user_membership(update, context):
+            await query.message.delete()
+            await start_action(update, context)
+        else:
+            await query.answer("You still haven't joined the channel.", show_alert=True)
+            
+    elif data.startswith("select_"):
+        imdb_id = data.split("_")[1]
+        if imdb_id in FILE_MAP:
+            message_id = FILE_MAP[imdb_id]
+            try:
+                await context.bot.forward_message(
+                    chat_id=query.from_user.id,
+                    from_chat_id=DATABASE_CHANNEL_ID,
+                    message_id=message_id
+                )
+                await query.edit_message_text(f"✅ File sent for IMDb ID: {imdb_id}")
+            except Exception as e:
+                logger.error(f"Failed to forward message {message_id} from {DATABASE_CHANNEL_ID}", exc_info=True)
+                await query.edit_message_text("❌ Sorry, I couldn't retrieve the file right now.")
+        else:
+            await query.edit_message_text("❌ Sorry, I don't have the file for the selected movie.")
 
-# --- Main Application Setup ---
-def main() -> None:
-    if not all([TELEGRAM_TOKEN, UPDATES_CHANNEL, DB_CHANNEL_ID, WELCOME_IMAGE_FILE_ID]):
-        logger.fatal("FATAL: One or more required environment variables are missing.")
-        return
+def main():
+    """Starts the bot."""
+    # Pre-run checks for essential environment variables
+    for var in ["TELEGRAM_TOKEN", "OMDB_API_KEY", "UPDATES_CHANNEL", "DATABASE_CHANNEL_ID", "WELCOME_IMAGE_FILE_ID"]:
+        if not os.environ.get(var):
+            logger.error(f"FATAL: Environment variable {var} is not set.")
+            return
 
-    allowed_updates = [UpdateType.MESSAGE, UpdateType.CALLBACK_QUERY, UpdateType.CHANNEL_POST]
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # THE FIX IS HERE: Using filters.Document.ALL instead of filters.DOCUMENT
-    application.add_handler(MessageHandler(
-        filters.Chat(chat_id=int(DB_CHANNEL_ID)) & (filters.Document.ALL | filters.VIDEO | filters.AUDIO), 
-        file_indexer
-    ))
-    
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_command))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_movies))
     application.add_handler(CallbackQueryHandler(button_handler))
 
     PORT = int(os.environ.get('PORT', 8443))
     WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL')
-    
-    logger.info("Starting bot...")
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TELEGRAM_TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}",
-        allowed_updates=allowed_updates
-    )
+    if WEBHOOK_URL:
+        application.run_webhook(
+            listen="0.0.0.0", port=PORT, url_path=TELEGRAM_TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
+        )
+    else:
+        application.run_polling()
 
 if __name__ == '__main__':
     main()
