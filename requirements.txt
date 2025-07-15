@@ -1,5 +1,5 @@
 # requirements.txt
 
-python-telegram-bot~=21.0
+python-telegram-bot[webhooks]~=21.0
 requests
 httpx
