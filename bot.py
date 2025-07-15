@@ -1,4 +1,4 @@
-# bot.py (Version 7 - Advanced Welcome & Language Preferences)
+# bot.py (Version 8 - Strict Language Filtering)
 
 import os
 import logging
@@ -18,8 +18,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- NEW: Language and Region Mapping ---
-# Maps language codes to full names and TMDB region codes for better search results
+# --- Language and Region Mapping (Unchanged) ---
 LANGUAGE_DATA = {
     'en': {'name': 'English', 'region': 'US'},
     'hi': {'name': 'Hindi', 'region': 'IN'},
@@ -29,75 +28,105 @@ LANGUAGE_DATA = {
     'fr': {'name': 'French', 'region': 'FR'},
 }
 
-# --- NEW: Helper functions for creating button keyboards ---
+# --- Button Keyboard Helpers (Unchanged) ---
 def get_main_menu_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("🇮🇳 Hindi", callback_data='lang_hi'), InlineKeyboardButton("🇬🇧 English", callback_data='lang_en')],
-        [InlineKeyboardButton("More Languages 🌍", callback_data='show_more_langs')]
-    ]
+    keyboard = [[InlineKeyboardButton("🇮🇳 Hindi", callback_data='lang_hi'), InlineKeyboardButton("🇬🇧 English", callback_data='lang_en')], [InlineKeyboardButton("More Languages 🌍", callback_data='show_more_langs')]]
     return InlineKeyboardMarkup(keyboard)
 
 def get_more_languages_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("Tamil", callback_data='lang_ta'), InlineKeyboardButton("Telugu", callback_data='lang_te')],
-        [InlineKeyboardButton("Spanish", callback_data='lang_es'), InlineKeyboardButton("French", callback_data='lang_fr')],
-        [InlineKeyboardButton("« Back", callback_data='back_to_main')]
-    ]
+    keyboard = [[InlineKeyboardButton("Tamil", callback_data='lang_ta'), InlineKeyboardButton("Telugu", callback_data='lang_te')], [InlineKeyboardButton("Spanish", callback_data='lang_es'), InlineKeyboardButton("French", callback_data='lang_fr')], [InlineKeyboardButton("« Back", callback_data='back_to_main')]]
     return InlineKeyboardMarkup(keyboard)
 
-# --- MODIFIED: Start command now shows the menu ---
+# --- Start and Button Handlers (Unchanged) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    welcome_message = (
-        f"Hey {user.first_name}! 👋 Welcome to the Ultimate Movie Bot! 🎬\n\n"
-        "Ready to find your next favorite film?\n\n"
-        "You can send me any movie title directly, or choose your preferred language below to get tailored results! 👇"
-    )
+    welcome_message = f"Hey {user.first_name}! 👋 Welcome to the Ultimate Movie Bot! 🎬\n\nReady to find your next favorite film?\n\nChoose your preferred language below to get tailored results! 👇"
     await update.message.reply_text(welcome_message, reply_markup=get_main_menu_keyboard())
 
-# --- NEW: Handler for all button clicks ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()  # Acknowledge the button press
-    
+    await query.answer()
     data = query.data
-
     if data == 'show_more_langs':
-        await query.edit_message_text(
-            text="Here are some more popular languages:",
-            reply_markup=get_more_languages_keyboard()
-        )
+        await query.edit_message_text(text="Here are some more popular languages:", reply_markup=get_more_languages_keyboard())
     elif data == 'back_to_main':
-        await query.edit_message_text(
-            text="Choose your preferred language or send me a title directly!",
-            reply_markup=get_main_menu_keyboard()
-        )
+        await query.edit_message_text(text="Choose your preferred language or send me a title directly!", reply_markup=get_main_menu_keyboard())
     elif data.startswith('lang_'):
         lang_code = data.split('_')[1]
-        context.user_data['language'] = lang_code  # Save the preference for this user
+        context.user_data['language'] = lang_code
         lang_name = LANGUAGE_DATA.get(lang_code, {}).get('name', 'selected language')
-        
-        await query.edit_message_text(
-            text=f"✅ Great! Your preferred language is set to *{lang_name}*.\n\nNow, send me any movie title to search!" ,
-            parse_mode='Markdown'
-        )
+        await query.edit_message_text(text=f"✅ Great! Your preferred language is set to *{lang_name}*.\n\nNow, send me any movie title to search!", parse_mode='Markdown')
 
-# --- MODIFIED: search_media now uses the language preference ---
+# --- MODIFIED: search_tmdb now STRICTLY filters by language ---
+async def search_tmdb(query: str, region: str | None = None, lang_code: str | None = None) -> dict | None:
+    logger.info(f"Searching TMDB for: '{query}' with region: {region} and language filter: {lang_code}")
+    try:
+        headers = {"accept": "application/json", "Authorization": f"Bearer {TMDB_API_KEY}"}
+        search_url = f"https://api.themoviedb.org/3/search/movie?query={query}&include_adult=false&language=en-US&page=1"
+        if region:
+            search_url += f"®ion={region}"
+
+        response = requests.get(search_url, headers=headers)
+        response.raise_for_status()
+        search_data = response.json()
+        if not search_data.get("results"):
+            return None
+
+        # --- THIS IS THE NEW STRICT FILTERING LOGIC ---
+        found_movie_id = None
+        if lang_code:
+            logger.info(f"Strictly filtering search results for language: {lang_code}")
+            for movie in search_data["results"]:
+                # The search result gives the original language of the movie
+                if movie.get('original_language') == lang_code:
+                    found_movie_id = movie['id']
+                    logger.info(f"Found language-matched movie: {movie.get('title')} (ID: {found_movie_id})")
+                    break  # Stop searching once we find the first match
+        else:
+            # If no language is set, just take the top result as before
+            found_movie_id = search_data["results"][0]["id"]
+
+        # If after filtering, we have no movie ID, it means no match was found.
+        if not found_movie_id:
+            logger.info("No movie found matching the strict language criteria.")
+            return None
+        # --- END OF NEW LOGIC ---
+
+        details_url = f"https://api.themoviedb.org/3/movie/{found_movie_id}?language=en-US"
+        details_response = requests.get(details_url, headers=headers)
+        details_response.raise_for_status()
+        data = details_response.json()
+
+        return {
+            "source": "TMDB", "title": data.get("title", "N/A"),
+            "rating": f"{data.get('vote_average', 0):.1f} / 10",
+            "genre": ", ".join([g['name'] for g in data.get("genres", [])]),
+            "language": data.get("spoken_languages")[0]['english_name'] if data.get("spoken_languages") else "N/A",
+            "runtime": f"{data.get('runtime', 0) // 60}h {data.get('runtime', 0) % 60}m" if data.get('runtime') else "N/A",
+            "release_date": data.get("release_date", "N/A"),
+            "poster_url": f"https://image.tmdb.org/t/p/w500{data.get('poster_path')}" if data.get('poster_path') else None,
+            "button_url": f"https://www.themoviedb.org/movie/{found_movie_id}"
+        }
+    except Exception as e:
+        logger.error(f"TMDB search failed: {e}")
+        return None
+
+# --- Main orchestrator function ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.message.text
-    
-    # Get user's language preference, default to None if not set
     user_lang_code = context.user_data.get('language')
     region = LANGUAGE_DATA.get(user_lang_code, {}).get('region') if user_lang_code else None
 
-    # We will pass the region to the TMDB search function
-    media_data = await search_tmdb(query, region)
+    # Pass the language code to the search function for strict filtering
+    media_data = await search_tmdb(query, region=region, lang_code=user_lang_code)
     
+    # If TMDB fails (including our new language filter), fall back to OMDb
     if not media_data:
         media_data = await search_omdb(query)
         
     if not media_data:
-        await update.message.reply_text("😞 Sorry, I couldn't find that movie on any of my databases.")
+        # This message now correctly shows if the movie is not found in the chosen language
+        await update.message.reply_text("Movie not found in the selected language or any of my databases.")
         return
         
     caption = (
@@ -120,43 +149,10 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=reply_markup)
 
-# --- MODIFIED: search_tmdb now accepts a region ---
-async def search_tmdb(query: str, region: str | None = None) -> dict | None:
-    logger.info(f"Searching TMDB for: '{query}' with region: {region}")
-    try:
-        headers = {"accept": "application/json", "Authorization": f"Bearer {TMDB_API_KEY}"}
-        search_url = f"https://api.themoviedb.org/3/search/movie?query={query}&include_adult=false&language=en-US&page=1"
-        if region:
-            search_url += f"®ion={region}" # Add region to the search for better results
-
-        response = requests.get(search_url, headers=headers)
-        response.raise_for_status()
-        search_data = response.json()
-        if not search_data.get("results"): return None
-
-        movie_id = search_data["results"][0]["id"]
-        details_url = f"https://api.themoviedb.org/3/movie/{movie_id}?language=en-US"
-        details_response = requests.get(details_url, headers=headers)
-        details_response.raise_for_status()
-        data = details_response.json()
-
-        return {
-            "source": "TMDB", "title": data.get("title", "N/A"),
-            "rating": f"{data.get('vote_average', 0):.1f} / 10",
-            "genre": ", ".join([g['name'] for g in data.get("genres", [])]),
-            "language": data.get("spoken_languages")[0]['english_name'] if data.get("spoken_languages") else "N/A",
-            "runtime": f"{data.get('runtime', 0) // 60}h {data.get('runtime', 0) % 60}m" if data.get('runtime') else "N/A",
-            "release_date": data.get("release_date", "N/A"),
-            "poster_url": f"https://image.tmdb.org/t/p/w500{data.get('poster_path')}" if data.get('poster_path') else None,
-            "button_url": f"https://www.themoviedb.org/movie/{movie_id}"
-        }
-    except Exception as e:
-        logger.error(f"TMDB search failed: {e}")
-        return None
-
-# --- search_omdb is unchanged ---
+# --- Unchanged OMDb search and error handler ---
 async def search_omdb(query: str) -> dict | None:
     logger.info(f"Falling back to OMDb for: {query}")
+    # This function remains a general, non-filtered search
     try:
         api_url = f"http://www.omdbapi.com/?apikey={OMDB_API_KEY}&t={query}"
         response = requests.get(api_url)
@@ -178,21 +174,18 @@ async def search_omdb(query: str) -> dict | None:
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.warning('Update "%s" caused error "%s"', update, context.error)
 
-# --- MODIFIED: main function now includes the CallbackQueryHandler ---
+# --- Unchanged main function ---
 def main() -> None:
     if not all([TELEGRAM_TOKEN, TMDB_API_KEY, OMDB_API_KEY]):
         logger.error("One or more API keys are missing from environment variables!")
         return
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # Add all the handlers
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler)) # Handles all button clicks
+    application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_media))
     application.add_error_handler(error_handler)
 
-    # Webhook setup is unchanged
     PORT = int(os.environ.get('PORT', 8443))
     APP_NAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
     if not APP_NAME:
