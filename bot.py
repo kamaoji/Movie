@@ -1,157 +1,151 @@
-# bot.py (Version 4: The Complete Professional Bot)
+# bot.py (Version 2 with TMDB API)
 
 import os
 import logging
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from telegram.constants import ParseMode
-from telegram.error import BadRequest, Forbidden
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
-# --- Configuration from Environment Variables ---
+# --- Configuration ---
+# Get your new TMDB token from your hosting environment variables
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-OMDB_API_KEY = os.environ.get("OMDB_API_KEY")
-UPDATES_CHANNEL = os.environ.get("UPDATES_CHANNEL") # Your PUBLIC channel (e.g., @mychannel)
-DATABASE_CHANNEL_ID = os.environ.get("DATABASE_CHANNEL_ID") # Your PRIVATE channel ID (e.g., -1001...)
-WELCOME_IMAGE_FILE_ID = os.environ.get("WELCOME_IMAGE_FILE_ID")
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY") # This is your v4 Read Access Token
 
 # --- Logging Setup ---
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# --- Simple "Database" Mapping ---
-# This maps a movie's IMDb ID to a Message ID in your DATABASE_CHANNEL_ID
-# You must manually find the Message ID for each file you post in your private channel.
-# To find a message ID, forward the message to a bot like @userinfobot
-FILE_MAP = {
-    "tt0133093": 2,  # Example: The Matrix -> Message ID 2 in your database channel
-    "tt1375666": 3,  # Example: Inception -> Message ID 3
-    "tt0468569": 4,  # Example: The Dark Knight -> Message ID 4
-    # Add more movies here...
-}
 
-# --- Middleware & Handlers ---
+# --- Bot Command Handlers ---
 
-async def check_user_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Checks if a user is a member of the required channel."""
-    if not UPDATES_CHANNEL: return True
-    user_id = update.effective_user.id
-    try:
-        member = await context.bot.get_chat_member(chat_id=UPDATES_CHANNEL, user_id=user_id)
-        return member.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]
-    except (BadRequest, Forbidden):
-        logger.error(f"Error checking membership for {user_id} in {UPDATES_CHANNEL}. Bot might not be admin.", exc_info=True)
-        return False # Fail safely
-
-async def force_subscribe_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, handler_func):
-    """Wrapper that enforces channel subscription before executing a command."""
-    if await check_user_membership(update, context):
-        await handler_func(update, context)
-    else:
-        channel_link = f"https://t.me/{UPDATES_CHANNEL.lstrip('@')}"
-        keyboard = [[InlineKeyboardButton("📢 JOIN CHANNEL 📢", url=channel_link)], [InlineKeyboardButton("🔄 Retry 🔄", callback_data="check_join")]]
-        await update.effective_message.reply_text(
-            "**You must join our channel to use this bot\\!**\n\nPlease join and click Retry\\.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await force_subscribe_wrapper(update, context, start_action)
-
-async def start_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """The actual start command logic."""
-    keyboard = [[InlineKeyboardButton("🔍 Search Movies", switch_inline_query_current_chat="")]]
-    await update.effective_message.reply_photo(
-        photo=WELCOME_IMAGE_FILE_ID,
-        caption=f"Welcome, {update.effective_user.first_name}\\!\n\nUse the button below to search for a movie\\.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN_V2
+def start(update: Update, context: CallbackContext) -> None:
+    """Sends a welcome message for the /start command."""
+    user = update.effective_user
+    welcome_message = (
+        f"Hi {user.first_name}! 🍿\n\n"
+        "I'm your upgraded Movie Info Bot, now powered by TMDB!\n\n"
+        "Send me the name of any movie or TV show to get started. For example: `Blade Runner 2049`"
     )
+    update.message.reply_text(welcome_message)
 
-async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await force_subscribe_wrapper(update, context, search_action)
+def error_handler(update: Update, context: CallbackContext) -> None:
+    """Logs errors."""
+    logger.warning('Update "%s" caused error "%s"', update, context.error)
 
-async def search_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles text messages to search for movies."""
+def search_media(update: Update, context: CallbackContext) -> None:
+    """Search for media (movie or TV) on TMDB and reply with the details."""
     query = update.message.text
-    api_url = f"http://www.omdbapi.com/?apikey={OMDB_API_KEY}&s={query}"
+    
+    # Define the headers for TMDB API v4 authentication
+    headers = {
+        "accept": "application/json",
+        "Authorization": f"Bearer {TMDB_API_KEY}"
+    }
+    
+    # --- Part 1: Search for the movie to get its ID ---
+    search_url = f"https://api.themoviedb.org/3/search/movie?query={query}&include_adult=false&language=en-US&page=1"
+    
     try:
-        response = requests.get(api_url)
-        data = response.json()
-        if data.get("Response") == "True":
-            results = data.get("Search", [])
-            keyboard = []
-            for movie in results[:5]: # Show top 5 results
-                button = InlineKeyboardButton(
-                    f"🎬 {movie['Title']} ({movie['Year']})",
-                    callback_data=f"select_{movie['imdbID']}"
-                )
-                keyboard.append([button])
-            if keyboard:
-                await update.message.reply_text("Here's what I found:", reply_markup=InlineKeyboardMarkup(keyboard))
-            else:
-                await update.message.reply_text("No results found.")
-        else:
-            await update.message.reply_text("Couldn't find that movie. Please try another title.")
-    except Exception as e:
-        logger.error("Error during movie search", exc_info=True)
-        await update.message.reply_text("Sorry, an error occurred during search.")
+        response = requests.get(search_url, headers=headers)
+        response.raise_for_status()
+        search_data = response.json()
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles all inline button clicks."""
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if data == "check_join":
-        if await check_user_membership(update, context):
-            await query.message.delete()
-            await start_action(update, context)
-        else:
-            await query.answer("You still haven't joined the channel.", show_alert=True)
-            
-    elif data.startswith("select_"):
-        imdb_id = data.split("_")[1]
-        if imdb_id in FILE_MAP:
-            message_id = FILE_MAP[imdb_id]
-            try:
-                await context.bot.forward_message(
-                    chat_id=query.from_user.id,
-                    from_chat_id=DATABASE_CHANNEL_ID,
-                    message_id=message_id
-                )
-                await query.edit_message_text(f"✅ File sent for IMDb ID: {imdb_id}")
-            except Exception as e:
-                logger.error(f"Failed to forward message {message_id} from {DATABASE_CHANNEL_ID}", exc_info=True)
-                await query.edit_message_text("❌ Sorry, I couldn't retrieve the file right now.")
-        else:
-            await query.edit_message_text("❌ Sorry, I don't have the file for the selected movie.")
-
-def main():
-    """Starts the bot."""
-    # Pre-run checks for essential environment variables
-    for var in ["TELEGRAM_TOKEN", "OMDB_API_KEY", "UPDATES_CHANNEL", "DATABASE_CHANNEL_ID", "WELCOME_IMAGE_FILE_ID"]:
-        if not os.environ.get(var):
-            logger.error(f"FATAL: Environment variable {var} is not set.")
+        if not search_data.get("results"):
+            update.message.reply_text("😞 Sorry, I couldn't find any movie with that name. Please check the spelling.")
             return
 
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+        # Get the top result from the search
+        top_result = search_data["results"][0]
+        
+        # --- Part 2: Use the ID to get detailed information ---
+        movie_id = top_result["id"]
+        details_url = f"https://api.themoviedb.org/3/movie/{movie_id}?language=en-US"
+        
+        details_response = requests.get(details_url, headers=headers)
+        details_response.raise_for_status()
+        data = details_response.json()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_movies))
-    application.add_handler(CallbackQueryHandler(button_handler))
+        # Extract movie details
+        title = data.get("title", "N/A")
+        tagline = data.get("tagline")
+        overview = data.get("overview", "No plot summary available.")
+        release_date = data.get("release_date", "N/A")
+        vote_average = data.get("vote_average", 0)
+        genres = ", ".join([genre['name'] for genre in data.get("genres", [])])
+        runtime = data.get("runtime", 0)
+        poster_path = data.get("poster_path")
 
-    PORT = int(os.environ.get('PORT', 8443))
-    WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL')
-    if WEBHOOK_URL:
-        application.run_webhook(
-            listen="0.0.0.0", port=PORT, url_path=TELEGRAM_TOKEN,
-            webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
+        # Format runtime from minutes to hours and minutes
+        if runtime:
+            hours = runtime // 60
+            minutes = runtime % 60
+            runtime_formatted = f"{hours}h {minutes}m"
+        else:
+            runtime_formatted = "N/A"
+            
+        # Create the image URL
+        poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
+        
+        # Create the message caption
+        caption = (
+            f"🎬 *{title}*\n"
+            f"_{tagline}_\n\n"
+            f"*{'─'*30}*\n\n"
+            f"*{overview}*\n\n"
+            f"*{'─'*30}*\n\n"
+            f"⭐ *Rating:* {vote_average:.1f} / 10\n"
+            f"🎭 *Genre:* {genres}\n"
+            f"🕒 *Runtime:* {runtime_formatted}\n"
+            f"📅 *Release Date:* {release_date}\n"
         )
-    else:
-        application.run_polling()
+        
+        # Send the message
+        if poster_url:
+            update.message.reply_photo(
+                photo=poster_url,
+                caption=caption,
+                parse_mode='Markdown'
+            )
+        else:
+            update.message.reply_text(caption, parse_mode='Markdown')
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API request failed: {e}")
+        update.message.reply_text("Sorry, I'm having trouble connecting to the movie database.")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred: {e}")
+        update.message.reply_text("An unexpected error occurred. Please try again later.")
+
+
+# --- Main Function to Run the Bot ---
+def main() -> None:
+    """Start the bot."""
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_TOKEN environment variable not set!")
+        return
+    if not TMDB_API_KEY:
+        logger.error("TMDB_API_KEY environment variable not set!")
+        return
+
+    updater = Updater(TELEGRAM_TOKEN)
+    dispatcher = updater.dispatcher
+
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, search_media))
+    dispatcher.add_error_handler(error_handler)
+
+    # For hosting on Render (Webhook)
+    PORT = int(os.environ.get('PORT', '8443'))
+    updater.start_webhook(listen="0.0.0.0",
+                          port=PORT,
+                          url_path=TELEGRAM_TOKEN,
+                          webhook_url=f"https://your-app-name.onrender.com/{TELEGRAM_TOKEN}")
+                          
+    logger.info("Bot has started with TMDB integration!")
+    updater.idle()
 
 if __name__ == '__main__':
     main()
