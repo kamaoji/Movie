@@ -1,4 +1,4 @@
-# bot.py (Version 19 - Final Polish: Delete User's Message Too)
+# bot.py (Version 20 - Private Channel Priority)
 
 import os
 import logging
@@ -34,20 +34,15 @@ def get_more_languages_keyboard():
     keyboard = [[InlineKeyboardButton("Tamil", callback_data='lang_ta'), InlineKeyboardButton("Telugu", callback_data='lang_te')], [InlineKeyboardButton("Spanish", callback_data='lang_es'), InlineKeyboardButton("French", callback_data='lang_fr')], [InlineKeyboardButton("« Back", callback_data='back_to_main')]]
     return InlineKeyboardMarkup(keyboard)
 
-# --- MODIFIED: Deletion function now also accepts user_message_id ---
+# --- Deletion function ---
 async def schedule_message_deletion(context: ContextTypes.DEFAULT_TYPE, chat_id: int, bot_message_id: int, user_message_id: int, user_name: str, delay: int = 60):
     """Schedules the bot's message AND the user's message to be deleted."""
     await asyncio.sleep(delay)
     try:
-        # Delete the bot's message first
         await context.bot.delete_message(chat_id=chat_id, message_id=bot_message_id)
-        logger.info(f"Auto-deleted bot message {bot_message_id} in chat {chat_id}.")
-        
-        # NEW: Delete the user's original message
         await context.bot.delete_message(chat_id=chat_id, message_id=user_message_id)
-        logger.info(f"Auto-deleted user message {user_message_id} in chat {chat_id}.")
-        
-        confirmation_text = f"Hey {user_name},\n\nYour previous request has been deleted to avoid clutter. 👍"
+        logger.info(f"Auto-deleted messages in chat {chat_id}.")
+        confirmation_text = f"Hey {user_name},\n\nYour previous request has been deleted. 👍"
         await context.bot.send_message(chat_id=chat_id, text=confirmation_text)
     except Exception as e:
         logger.warning(f"Could not delete one or both messages in chat {chat_id}: {e}")
@@ -89,8 +84,8 @@ async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.info(f"Persistently Indexed: Key='{index_key}', Type='{file_type}'")
         try:
             await context.bot.add_reaction(chat_id=PRIVATE_CHANNEL_ID, message_id=post.message_id, reaction="👍")
-        except Exception as e:
-            logger.warning(f"Could not react to message: {e}")
+        except Exception:
+            pass # Harmless warning, so we just ignore it
 
 # --- Helper for URL buttons ---
 def create_url_buttons_from_caption(caption: str) -> (str, InlineKeyboardMarkup | None):
@@ -105,43 +100,59 @@ def create_url_buttons_from_caption(caption: str) -> (str, InlineKeyboardMarkup 
         else: cleaned_lines.append(line)
     return '\n'.join(cleaned_lines).strip(), InlineKeyboardMarkup(buttons) if buttons else None
 
-# --- Main search function ---
+# --- MODIFIED: Main search function with new priority ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    user_message_id = update.message.message_id # Get the ID of the user's message
+    user_message_id = update.message.message_id
     query = update.message.text.lower().strip()
     user_lang_code = context.user_data.get('language')
     deletion_warning = "\n\n\n*⚠️ This message & your request will automatically delete in 1 minute!*"
     sent_message = None
 
+    # --- NEW STEP 1: Search private channel FIRST ---
+    if user_lang_code:
+        index_key = f"{query}_{user_lang_code}"
+        movie_data = context.bot_data.get('movie_index', {}).get(index_key)
+        if movie_data:
+            logger.info(f"Found in private index! Sending to user {user.id}.")
+            final_caption, reply_markup = create_url_buttons_from_caption('\n'.join([line for line in movie_data["original_caption"].split('\n') if '#Title' not in line and '#Lang' not in line]).strip())
+            final_caption += deletion_warning
+            try:
+                if movie_data["file_type"] == "photo": sent_message = await context.bot.send_photo(chat_id=user.id, photo=movie_data["file_id"], caption=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
+                elif movie_data["file_type"] == "video": sent_message = await context.bot.send_video(chat_id=user.id, video=movie_data["file_id"], caption=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
+                elif movie_data["file_type"] == "document": sent_message = await context.bot.send_document(chat_id=user.id, document=movie_data["file_id"], caption=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
+                else: sent_message = await context.bot.send_message(chat_id=user.id, text=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
+                
+                # If sending was successful, schedule deletion and stop here.
+                if sent_message:
+                    asyncio.create_task(schedule_message_deletion(context, sent_message.chat_id, sent_message.message_id, user_message_id, user.first_name))
+                return
+            except Exception as e:
+                logger.error(f"Failed to send from index: {e}"); await update.message.reply_text("I found the movie in my library, but couldn't send it.")
+                return
+
+    # --- NEW STEP 2: If not in private channel, try TMDB ---
+    logger.info(f"Not in private index. Searching TMDB for user {user.id}.")
     region = LANGUAGE_DATA.get(user_lang_code, {}).get('region') if user_lang_code else None
     tmdb_data = await search_tmdb(query, region=region, lang_code=user_lang_code)
     if tmdb_data:
         caption = (f"🎬 *{tmdb_data['title']}*\n\n⭐ *TMDB Rating:* {tmdb_data['rating']}\n🎭 *Genre:* {tmdb_data['genre']}\n🌐 *Language:* {tmdb_data['language']}\n🕒 *Runtime:* {tmdb_data['runtime']}\n📅 *Release Date:* {tmdb_data['release_date']}") + deletion_warning
         reply_markup = None
         if tmdb_data.get('button_url'): reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"More Info on {tmdb_data['source']}", url=tmdb_data['button_url'])]])
+        
         if tmdb_data.get('poster_url'): sent_message = await update.message.reply_photo(photo=tmdb_data['poster_url'], caption=caption, parse_mode='Markdown', reply_markup=reply_markup)
         else: sent_message = await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=reply_markup)
-    else:
-        if user_lang_code:
-            index_key = f"{query}_{user_lang_code}"
-            movie_data = context.bot_data.get('movie_index', {}).get(index_key)
-            if movie_data:
-                final_caption, reply_markup = create_url_buttons_from_caption('\n'.join([line for line in movie_data["original_caption"].split('\n') if '#Title' not in line and '#Lang' not in line]).strip())
-                final_caption += deletion_warning
-                try:
-                    if movie_data["file_type"] == "photo": sent_message = await context.bot.send_photo(chat_id=user.id, photo=movie_data["file_id"], caption=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
-                    elif movie_data["file_type"] == "video": sent_message = await context.bot.send_video(chat_id=user.id, video=movie_data["file_id"], caption=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
-                    elif movie_data["file_type"] == "document": sent_message = await context.bot.send_document(chat_id=user.id, document=movie_data["file_id"], caption=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
-                    else: sent_message = await context.bot.send_message(chat_id=user.id, text=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
-                except Exception as e:
-                    logger.error(f"Failed to re-send message from index: {e}"); await update.message.reply_text("I found the movie in my library, but couldn't send it.")
+        
+        if sent_message:
+            asyncio.create_task(schedule_message_deletion(context, sent_message.chat_id, sent_message.message_id, user_message_id, user.first_name))
+        return
 
-    if sent_message:
-        # Schedule the deletion of BOTH messages
-        asyncio.create_task(schedule_message_deletion(context, sent_message.chat_id, sent_message.message_id, user_message_id, user.first_name))
-    elif not tmdb_data:
-        await update.message.reply_text("Movie not found in TMDB or my private library for the selected language.")
+    # --- NEW STEP 3: If not found anywhere ---
+    logger.info(f"Movie not found anywhere for user {user.id}.")
+    not_found_msg = await update.message.reply_text("Movie not found in my private library or on TMDB for the selected language.")
+    # Also delete the "not found" message and user's request after a delay
+    asyncio.create_task(schedule_message_deletion(context, not_found_msg.chat_id, not_found_msg.message_id, user_message_id, user.first_name))
+
 
 # --- search_tmdb function ---
 async def search_tmdb(query: str, region: str | None = None, lang_code: str | None = None) -> dict | None:
