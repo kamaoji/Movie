@@ -1,10 +1,10 @@
-# bot.py (Version 18 - Final Fix with asyncio for Deletion)
+# bot.py (Version 19 - The Final, Polished Version)
 
 import os
 import logging
 import requests
 import re
-import asyncio # Import the asyncio library
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters,
@@ -34,17 +34,22 @@ def get_more_languages_keyboard():
     keyboard = [[InlineKeyboardButton("Tamil", callback_data='lang_ta'), InlineKeyboardButton("Telugu", callback_data='lang_te')], [InlineKeyboardButton("Spanish", callback_data='lang_es'), InlineKeyboardButton("French", callback_data='lang_fr')], [InlineKeyboardButton("« Back", callback_data='back_to_main')]]
     return InlineKeyboardMarkup(keyboard)
 
-# --- NEW: Asynchronous function to handle message deletion ---
-async def schedule_message_deletion(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, user_name: str, delay: int = 60):
-    """Schedules a message to be deleted after a delay using asyncio."""
-    await asyncio.sleep(delay) # Non-blocking sleep for 60 seconds
+# --- MODIFIED: Deletion function with a smarter confirmation message ---
+async def schedule_message_deletion(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, user_name: str, query: str, delay: int = 60):
+    """Schedules a message to be deleted and sends a smart confirmation."""
+    await asyncio.sleep(delay)
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        logger.info(f"Auto-deleted message {message_id} in chat {chat_id}.")
-        confirmation_text = f"Hey {user_name},\n\nYour previous request has been deleted to avoid clutter. 👍"
-        await context.bot.send_message(chat_id=chat_id, text=confirmation_text)
+        logger.info(f"Auto-deleted message {message_id} for query '{query}'.")
+        
+        # This is the new, smarter confirmation message
+        confirmation_text = (
+            f"The movie post for `'{query.title()}'` has been cleared.\n\n"
+            "You can now delete your original request to keep the chat clean. 👍"
+        )
+        await context.bot.send_message(chat_id=chat_id, text=confirmation_text, parse_mode='Markdown')
     except Exception as e:
-        logger.warning(f"Could not delete message {message_id} in chat {chat_id} (maybe already deleted): {e}")
+        logger.warning(f"Could not delete message {message_id}: {e}")
 
 # --- Bot Handlers (Start & Button) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -131,8 +136,8 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     logger.error(f"Failed to re-send message from index: {e}"); await update.message.reply_text("I found the movie in my library, but couldn't send it.")
 
     if sent_message:
-        # Create a "fire and forget" task for the deletion
-        asyncio.create_task(schedule_message_deletion(context, sent_message.chat_id, sent_message.message_id, user.first_name))
+        # MODIFIED: Pass the original query to the deletion task
+        asyncio.create_task(schedule_message_deletion(context, sent_message.chat_id, sent_message.message_id, user.first_name, query))
     elif not tmdb_data:
         await update.message.reply_text("Movie not found in TMDB or my private library for the selected language.")
 
