@@ -1,4 +1,4 @@
-# bot.py (Version 14 - Fix Parse Error in Channel Output)
+# bot.py (Version 15 - Buttons for Private Channel Posts)
 
 import os
 import logging
@@ -19,8 +19,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- In-Memory Index (Unchanged) ---
-movie_index = {}
+# --- In-Memory Index (MODIFIED SLIGHTLY to ensure message_id is always there) ---
+movie_index = {} 
 
 # --- Language and Button Data (Unchanged) ---
 LANGUAGE_DATA = {
@@ -58,7 +58,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lang_name = LANGUAGE_DATA.get(lang_code, {}).get('name', 'selected language')
         await query.edit_message_text(text=f"✅ Great! Your preferred language is set to *{lang_name}*.\n\nNow, send me any movie title to search!", parse_mode='Markdown')
 
-# --- Indexing function (Unchanged from Version 13) ---
+# --- MODIFIED: Indexing function now ensures message_id is stored ---
 async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.channel_post or str(update.channel_post.chat.id) != PRIVATE_CHANNEL_ID: return
     caption = update.channel_post.caption
@@ -69,7 +69,7 @@ async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if title_match and lang_match:
         title = title_match.group(1).strip().lower()
         lang = lang_match.group(1).strip().lower()
-        message_id = update.channel_post.message_id
+        message_id = update.channel_post.message_id 
         index_key = f"{title}_{lang}"
 
         file_id = None
@@ -87,7 +87,8 @@ async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         movie_index[index_key] = {
             "file_id": file_id,
             "file_type": file_type,
-            "original_caption": caption # Store the entire original caption
+            "original_caption": caption, # Store the entire original caption
+            "message_id": message_id # Ensure message_id is stored for the button URL
         }
         logger.info(f"Successfully Indexed: Key='{index_key}', Type='{file_type}', Message ID='{message_id}'")
         try:
@@ -95,7 +96,7 @@ async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception as e:
             logger.warning(f"Could not react to message (check permissions): {e}")
 
-# --- MODIFIED: Main search function - Removed parse_mode for channel posts ---
+# --- MODIFIED: Main search function to add button for channel posts ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.message.text.lower().strip()
     user_id = update.effective_user.id
@@ -127,7 +128,7 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=reply_markup)
         return
 
-    # --- Step 2: Search private index (MODIFIED: REMOVED parse_mode) ---
+    # --- Step 2: Search private index (MODIFIED: ADD BUTTON) ---
     if user_lang_code:
         index_key = f"{query}_{user_lang_code}"
         movie_data_from_index = movie_index.get(index_key)
@@ -136,6 +137,7 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             file_id = movie_data_from_index.get("file_id")
             file_type = movie_data_from_index.get("file_type")
             original_caption = movie_data_from_index.get("original_caption", "")
+            message_id_from_index = movie_data_from_index.get("message_id") # Get the stored message ID
 
             # --- Clean the caption: remove #Title and #Lang lines ---
             cleaned_caption_lines = []
@@ -145,18 +147,28 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 cleaned_caption_lines.append(line)
             cleaned_caption = '\n'.join(cleaned_caption_lines).strip()
 
+            # --- NEW: Create button for private channel post ---
+            reply_markup = None
+            if message_id_from_index:
+                # Remove the -100 prefix from PRIVATE_CHANNEL_ID for the t.me/c/ link
+                # (if it's a supergroup ID, it usually starts with -100)
+                channel_link_id = PRIVATE_CHANNEL_ID.replace('-100', '') 
+                channel_post_url = f"https://t.me/c/{channel_link_id}/{message_id_from_index}"
+                keyboard = [[InlineKeyboardButton("View Original Post", url=channel_post_url)]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
             logger.info(f"Found in private index! Re-sending '{index_key}'.")
             try:
-                # Send based on file type. IMPORTANT: NO parse_mode for channel posts.
+                # Send based on file type. No parse_mode for channel posts.
                 if file_id and file_type == "photo":
-                    await context.bot.send_photo(chat_id=user_id, photo=file_id, caption=cleaned_caption) # Removed parse_mode
+                    await context.bot.send_photo(chat_id=user_id, photo=file_id, caption=cleaned_caption, reply_markup=reply_markup)
                 elif file_id and file_type == "video":
-                    await context.bot.send_video(chat_id=user_id, video=file_id, caption=cleaned_caption) # Removed parse_mode
+                    await context.bot.send_video(chat_id=user_id, video=file_id, caption=cleaned_caption, reply_markup=reply_markup)
                 elif file_id and file_type == "document":
-                     await context.bot.send_document(chat_id=user_id, document=file_id, caption=cleaned_caption) # Removed parse_mode
+                     await context.bot.send_document(chat_id=user_id, document=file_id, caption=cleaned_caption, reply_markup=reply_markup)
                 else: # Fallback for text-only posts or if media type isn't handled
-                    await context.bot.send_message(chat_id=user_id, text=cleaned_caption) # Removed parse_mode
-                return
+                    await context.bot.send_message(chat_id=user_id, text=cleaned_caption, reply_markup=reply_markup)
+                return 
             except Exception as e:
                 logger.error(f"Failed to re-send message from private index: {e}")
                 await update.message.reply_text("I found the movie in my library, but couldn't send it. There might be an issue with the post content or my permissions.")
