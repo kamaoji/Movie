@@ -1,29 +1,32 @@
-# bot.py (Version 15 - Auto URL Buttons & Indexing Fix)
+# bot.py (Version 16 - Auto-Delete Bot's Reply after 1 minute)
 
 import os
 import logging
 import requests
 import re
+import datetime # NEW: For time calculations
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters,
-    ContextTypes, CallbackQueryHandler, PicklePersistence
+    ContextTypes, CallbackQueryHandler, PicklePersistence, JobQueue # NEW: Import JobQueue
 )
 
 # --- Configuration & Logging ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 PRIVATE_CHANNEL_ID = os.environ.get("PRIVATE_CHANNEL_ID")
+
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Language and Button Data ---
+# --- Language and Button Data (Unchanged) ---
 LANGUAGE_DATA = {
     'en': {'name': 'English', 'region': 'US'}, 'hi': {'name': 'Hindi', 'region': 'IN'},
     'ta': {'name': 'Tamil', 'region': 'IN'}, 'te': {'name': 'Telugu', 'region': 'IN'},
     'es': {'name': 'Spanish', 'region': 'ES'}, 'fr': {'name': 'French', 'region': 'FR'},
 }
 
+# --- Button Keyboard Helpers (Unchanged) ---
 def get_main_menu_keyboard():
     keyboard = [[InlineKeyboardButton("🇮🇳 Hindi", callback_data='lang_hi'), InlineKeyboardButton("🇬🇧 English", callback_data='lang_en')], [InlineKeyboardButton("More Languages 🌍", callback_data='show_more_langs')]]
     return InlineKeyboardMarkup(keyboard)
@@ -50,67 +53,55 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lang_name = LANGUAGE_DATA.get(lang_code, {}).get('name', 'selected language')
         await query.edit_message_text(text=f"✅ Great! Your preferred language is now permanently set to *{lang_name}*.\n\nSend me any movie title to search!", parse_mode='Markdown')
 
-# --- MODIFIED: Indexing function with BUG FIX for text messages ---
+# --- Indexing function (Unchanged) ---
 async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.channel_post or str(update.channel_post.chat.id) != PRIVATE_CHANNEL_ID: return
-    
     post = update.channel_post
-    caption = post.caption if post.caption else post.text # BUG FIX: Also read from post.text
+    caption = post.caption if post.caption else post.text
     if not caption: return
-
     title_match = re.search(r'#Title\s+([^\n]+)', caption, re.IGNORECASE)
     lang_match = re.search(r'#Lang\s+([a-zA-Z]{2})', caption, re.IGNORECASE)
-    
     if title_match and lang_match:
         title = title_match.group(1).strip().lower()
         lang = lang_match.group(1).strip().lower()
         index_key = f"{title}_{lang}"
-
         file_id, file_type = (None, None)
-        # BUG FIX: Handle text posts with web page previews (like your "Evil Dead Rise" post)
         if post.photo: file_id, file_type = post.photo[-1].file_id, "photo"
         elif post.video: file_id, file_type = post.video.file_id, "video"
         elif post.document: file_id, file_type = post.document.file_id, "document"
-        elif post.text: file_type = "text" # Explicitly mark as a text post
-
-        context.bot_data.setdefault('movie_index', {})[index_key] = {
-            "file_id": file_id, "file_type": file_type, "original_caption": caption
-        }
+        elif post.text: file_type = "text"
+        context.bot_data.setdefault('movie_index', {})[index_key] = {"file_id": file_id, "file_type": file_type, "original_caption": caption}
         logger.info(f"Persistently Indexed: Key='{index_key}', Type='{file_type}'")
-        try:
-            await context.bot.add_reaction(chat_id=PRIVATE_CHANNEL_ID, message_id=post.message_id, reaction="👍")
-        except Exception as e:
-            logger.warning(f"Could not react to message: {e}")
+        try: await context.bot.add_reaction(chat_id=PRIVATE_CHANNEL_ID, message_id=post.message_id, reaction="👍")
+        except Exception as e: logger.warning(f"Could not react to message: {e}")
 
-# --- NEW: Helper function to create auto buttons ---
+# --- Helper function to create auto buttons (Unchanged) ---
 def create_url_buttons_from_caption(caption: str) -> (str, InlineKeyboardMarkup | None):
-    """Parses a caption, extracts URLs, creates buttons, and returns a cleaned caption."""
     lines = caption.split('\n')
     cleaned_lines = []
     buttons = []
-    # URL regex to find http/https links
     url_regex = r'https?://[^\s]+'
-
     for i, line in enumerate(lines):
         if re.search(url_regex, line):
-            # The line contains a URL. Use the previous line as the button label.
             if i > 0 and not re.search(url_regex, lines[i-1]):
                 button_label = lines[i-1].strip()
-                # Find all URLs in the current line (though usually just one)
                 urls = re.findall(url_regex, line)
-                for url in urls:
-                    buttons.append([InlineKeyboardButton(button_label, url=url)])
-            # We don't add the URL line itself to the cleaned caption
-        elif i + 1 < len(lines) and re.search(url_regex, lines[i+1]):
-            # This is a label line for a URL on the next line, so we skip it.
-            pass
-        else:
-            cleaned_lines.append(line)
-            
+                for url in urls: buttons.append([InlineKeyboardButton(button_label, url=url)])
+        elif i + 1 < len(lines) and re.search(url_regex, lines[i+1]): pass
+        else: cleaned_lines.append(line)
     cleaned_caption = '\n'.join(cleaned_lines).strip()
     return cleaned_caption, InlineKeyboardMarkup(buttons) if buttons else None
 
-# --- Main search function ---
+# --- NEW: Function to delete message ---
+async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job = context.job
+    try:
+        await context.bot.delete_message(chat_id=job.data['chat_id'], message_id=job.data['message_id'])
+        logger.info(f"Deleted message {job.data['message_id']} in chat {job.data['chat_id']}")
+    except Exception as e:
+        logger.error(f"Failed to delete message {job.data['message_id']} in chat {job.data['chat_id']}: {e}")
+
+# --- MODIFIED: Main search function to schedule deletion ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.message.text.lower().strip()
     user_id = update.effective_user.id
@@ -130,8 +121,23 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if tmdb_data.get('button_url'):
             keyboard = [[InlineKeyboardButton(f"More Info on {tmdb_data['source']}", url=tmdb_data['button_url'])]]
             reply_markup = InlineKeyboardMarkup(keyboard)
-        if tmdb_data.get('poster_url'): await update.message.reply_photo(photo=tmdb_data['poster_url'], caption=caption, parse_mode='Markdown', reply_markup=reply_markup)
-        else: await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=reply_markup)
+
+        # Send the TMDB message
+        sent_message = None
+        if tmdb_data.get('poster_url'): sent_message = await update.message.reply_photo(photo=tmdb_data['poster_url'], caption=caption, parse_mode='Markdown', reply_markup=reply_markup)
+        else: sent_message = await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=reply_markup)
+        
+        # NEW: Schedule deletion of this message
+        if sent_message:
+            context.job_queue.run_once(
+                delete_message_job, 
+                datetime.timedelta(minutes=1), # Delete after 1 minute
+                data={'chat_id': sent_message.chat_id, 'message_id': sent_message.message_id}
+            )
+            # Add a clear disclaimer for the user
+            await update.message.reply_text(
+                "⚠️ This message will be automatically deleted in 1 minute. Please forward the file/links to another chat quickly if needed!"
+            )
         return
 
     # --- Step 2: Search persistent private index ---
@@ -141,24 +147,28 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         movie_data_from_index = movie_index.get(index_key)
         if movie_data_from_index:
             file_id, file_type, original_caption = movie_data_from_index.get("file_id"), movie_data_from_index.get("file_type"), movie_data_from_index.get("original_caption", "")
-            
-            # Remove the indexing tags first
             base_cleaned_caption = '\n'.join([line for line in original_caption.split('\n') if '#Title' not in line and '#Lang' not in line]).strip()
-            
-            # NEW: Generate final caption and buttons from the remaining text
             final_caption, reply_markup = create_url_buttons_from_caption(base_cleaned_caption)
 
-            logger.info(f"Found in persistent index! Re-sending '{index_key}'.")
-            try:
-                if file_type == "photo": await context.bot.send_photo(chat_id=user_id, photo=file_id, caption=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
-                elif file_type == "video": await context.bot.send_video(chat_id=user_id, video=file_id, caption=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
-                elif file_type == "document": await context.bot.send_document(chat_id=user_id, document=file_id, caption=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
-                else: await context.bot.send_message(chat_id=user_id, text=final_caption, parse_mode='Markdown', reply_markup=reply_markup) # Handles text posts
-                return
-            except Exception as e:
-                logger.error(f"Failed to re-send message from persistent index: {e}")
-                await update.message.reply_text("I found the movie in my library, but couldn't send it.")
-                return
+            # Send the private channel message
+            sent_message = None
+            if file_type == "photo": sent_message = await context.bot.send_photo(chat_id=user_id, photo=file_id, caption=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
+            elif file_type == "video": sent_message = await context.bot.send_video(chat_id=user_id, video=file_id, caption=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
+            elif file_type == "document": sent_message = await context.bot.send_document(chat_id=user_id, document=file_id, caption=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
+            else: sent_message = await context.bot.send_message(chat_id=user_id, text=final_caption, parse_mode='Markdown', reply_markup=reply_markup) # Handles text posts
+
+            # NEW: Schedule deletion of this message
+            if sent_message:
+                context.job_queue.run_once(
+                    delete_message_job, 
+                    datetime.timedelta(minutes=1), 
+                    data={'chat_id': sent_message.chat_id, 'message_id': sent_message.message_id}
+                )
+                # Add a clear disclaimer for the user
+                await update.message.reply_text(
+                    "⚠️ This message will be automatically deleted in 1 minute. Please forward the file/links to another chat quickly if needed!"
+                )
+            return
 
     # --- Step 3: If all fails ---
     await update.message.reply_text("Movie not found in TMDB or my private library for the selected language.")
@@ -193,20 +203,37 @@ async def search_tmdb(query: str, region: str | None = None, lang_code: str | No
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.warning('Update "%s" caused error "%s"', update, context.error)
 
-# --- Main function with persistence (Unchanged) ---
+# --- MODIFIED: main function now passes JobQueue to Application ---
 def main() -> None:
     if not all([TELEGRAM_TOKEN, TMDB_API_KEY, PRIVATE_CHANNEL_ID]):
         logger.error("One or more required environment variables are missing!")
         return
+    
     persistence = PicklePersistence(filepath="bot_persistence.pkl")
-    application = (Application.builder().token(TELEGRAM_TOKEN).persistence(persistence).build())
+    
+    # NEW: Create a JobQueue instance
+    job_queue = JobQueue()
+
+    # Build the application with persistence and job_queue
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .persistence(persistence)
+        .job_queue(job_queue) # Pass the job_queue instance
+        .build()
+    )
+
     if 'movie_index' not in application.bot_data:
         application.bot_data['movie_index'] = {}
+
+    # Add handlers (Unchanged)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, update_index))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_media))
     application.add_error_handler(error_handler)
+
+    # Webhook setup (Unchanged)
     PORT = int(os.environ.get('PORT', 8443))
     APP_NAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
     if not APP_NAME:
