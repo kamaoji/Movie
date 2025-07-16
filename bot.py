@@ -1,4 +1,4 @@
-# bot.py (Version 20 - Search Order Fix & Admin Re-index Command)
+# bot.py (Version 21 - The Final Polish: Auto-Cleanup & Edit-to-Reindex)
 
 import os
 import logging
@@ -15,7 +15,7 @@ from telegram.ext import (
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 PRIVATE_CHANNEL_ID = os.environ.get("PRIVATE_CHANNEL_ID")
-ADMIN_ID = os.environ.get("ADMIN_ID") # Your User ID for admin commands
+ADMIN_ID = os.environ.get("ADMIN_ID")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -35,14 +35,25 @@ def get_more_languages_keyboard():
     keyboard = [[InlineKeyboardButton("Tamil", callback_data='lang_ta'), InlineKeyboardButton("Telugu", callback_data='lang_te')], [InlineKeyboardButton("Spanish", callback_data='lang_es'), InlineKeyboardButton("French", callback_data='lang_fr')], [InlineKeyboardButton("« Back", callback_data='back_to_main')]]
     return InlineKeyboardMarkup(keyboard)
 
-# --- Deletion and URL Button Helpers (Unchanged) ---
+# --- NEW: Helper function to delete the bot's previous message ---
+async def delete_previous_bot_message(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Checks for and deletes the last message the bot sent to the user."""
+    last_message_id = context.user_data.pop('last_bot_message_id', None)
+    if last_message_id:
+        try:
+            await context.bot.delete_message(chat_id=context._chat_id, message_id=last_message_id)
+        except Exception as e:
+            logger.info(f"Could not delete previous bot message (it may have been manually deleted): {e}")
+
+# --- Deletion and URL Button Helpers ---
 async def schedule_message_deletion(context: ContextTypes.DEFAULT_TYPE, chat_id: int, bot_message_id: int, user_message_id: int, user_name: str, delay: int = 60):
     await asyncio.sleep(delay)
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=bot_message_id)
         await context.bot.delete_message(chat_id=chat_id, message_id=user_message_id)
-        confirmation_text = f"Hey {user_name},\n\nYour previous request has been deleted to avoid clutter. 👍"
-        await context.bot.send_message(chat_id=chat_id, text=confirmation_text)
+        # MODIFIED: Also clean up the 'request deleted' message after sending it
+        confirmation_message = await context.bot.send_message(chat_id=chat_id, text=f"Hey {user_name},\n\nYour previous request has been deleted to avoid clutter. 👍")
+        context.user_data['last_bot_message_id'] = confirmation_message.message_id
     except Exception as e:
         logger.warning(f"Could not delete one or both messages in chat {chat_id}: {e}")
 
@@ -58,16 +69,19 @@ def create_url_buttons_from_caption(caption: str) -> (str, InlineKeyboardMarkup 
         else: cleaned_lines.append(line)
     return '\n'.join(cleaned_lines).strip(), InlineKeyboardMarkup(buttons) if buttons else None
 
-# --- Bot Handlers (Start & Button unchanged) ---
+# --- MODIFIED Bot Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await delete_previous_bot_message(context) # Clean up previous message
     user = update.effective_user
-    welcome_message = f"Hey {user.first_name}! 👋 Welcome to the Ultimate Movie Bot! 🎬\n\nMy responses & your requests will be deleted after 1 minute!\n\nChoose your preferred language below. 👇"
-    await update.message.reply_text(welcome_message, reply_markup=get_main_menu_keyboard())
+    welcome_message = f"Hey {user.first_name}! 👋 Welcome to the Ultimate Movie Bot! 🎬\n\nYour requests will be auto-deleted after 1 minute!\n\nChoose your preferred language below. 👇"
+    sent_message = await update.message.reply_text(welcome_message, reply_markup=get_main_menu_keyboard())
+    context.user_data['last_bot_message_id'] = sent_message.message_id
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     data = query.data
+    # For button clicks, we don't delete the previous message to allow menu navigation.
     if data == 'show_more_langs': await query.edit_message_text(text="Here are some more popular languages:", reply_markup=get_more_languages_keyboard())
     elif data == 'back_to_main': await query.edit_message_text(text="Choose your preferred language or send me a title directly!", reply_markup=get_main_menu_keyboard())
     elif data.startswith('lang_'):
@@ -76,10 +90,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lang_name = LANGUAGE_DATA.get(lang_code, {}).get('name', 'selected language')
         await query.edit_message_text(text=f"✅ Great! Your preferred language is now permanently set to *{lang_name}*.\n\nSend me any movie title to search!", parse_mode='Markdown')
 
-# --- Indexing function (Unchanged) ---
+# --- MODIFIED Indexing function to handle EDITS ---
 async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.channel_post or str(update.channel_post.chat.id) != PRIVATE_CHANNEL_ID: return
-    post = update.channel_post
+    # BUG FIX: Use a general message object that works for both new and edited posts
+    post = update.edited_channel_post or update.channel_post
+    if not post or str(post.chat.id) != PRIVATE_CHANNEL_ID: return
+    
     caption = post.caption if post.caption else post.text
     if not caption: return
     title_match, lang_match = re.search(r'#Title\s+([^\n]+)', caption, re.IGNORECASE), re.search(r'#Lang\s+([a-zA-Z]{2})', caption, re.IGNORECASE)
@@ -92,28 +108,22 @@ async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         elif post.document: file_id, file_type = post.document.file_id, "document"
         elif post.text: file_type = "text"
         context.bot_data.setdefault('movie_index', {})[index_key] = {"file_id": file_id, "file_type": file_type, "original_caption": caption}
-        logger.info(f"Persistently Indexed: Key='{index_key}', Type='{file_type}'")
+        logger.info(f"Persistently Indexed (or Re-indexed): Key='{index_key}', Type='{file_type}'")
 
-# --- NEW: Admin command to re-index the channel ---
 async def reindex_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await delete_previous_bot_message(context)
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
         await update.message.reply_text("⛔️ Sorry, this is an admin-only command.")
         return
-    
-    # Clear the old index
     context.bot_data['movie_index'] = {}
     logger.info(f"Admin {user_id} cleared the movie index.")
-    
-    await update.message.reply_text(
-        "✅ **Index Cleared Successfully!**\n\n"
-        "To rebuild the index, please go to your private channel and **edit** every movie post you want to be searchable. "
-        "Just adding a space at the end of the caption and saving is enough to trigger a re-index.",
-        parse_mode='Markdown'
-    )
+    sent_message = await update.message.reply_text("✅ **Index Cleared!**\n\nTo rebuild the index, please go to your channel and **edit** every movie post.", parse_mode='Markdown')
+    context.user_data['last_bot_message_id'] = sent_message.message_id
 
-# --- MODIFIED: Main search function with NEW SEARCH ORDER ---
+# --- Main search function with auto-cleanup ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await delete_previous_bot_message(context)
     user = update.effective_user
     user_message_id = update.message.message_id
     query = update.message.text.lower().strip()
@@ -121,7 +131,7 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     deletion_warning = "\n\n\n*⚠️ This message & your request will automatically delete in 1 minute!*"
     sent_message = None
 
-    # --- Step 1: Search private channel index FIRST ---
+    # Step 1: Search private channel first
     if user_lang_code:
         index_key = f"{query}_{user_lang_code}"
         movie_data = context.bot_data.get('movie_index', {}).get(index_key)
@@ -135,12 +145,11 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 else: sent_message = await context.bot.send_message(chat_id=user.id, text=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
             except Exception as e:
                 logger.error(f"Failed to re-send message from index: {e}"); await update.message.reply_text("I found the movie in my library, but couldn't send it.")
-            
             if sent_message:
                 asyncio.create_task(schedule_message_deletion(context, sent_message.chat_id, sent_message.message_id, user_message_id, user.first_name))
-            return # IMPORTANT: Stop here if found in private channel
+            return
 
-    # --- Step 2: If not in private channel, search TMDB ---
+    # Step 2: Search TMDB
     region = LANGUAGE_DATA.get(user_lang_code, {}).get('region') if user_lang_code else None
     tmdb_data = await search_tmdb(query, region=region, lang_code=user_lang_code)
     if tmdb_data:
@@ -149,16 +158,17 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if tmdb_data.get('button_url'): reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"More Info on {tmdb_data['source']}", url=tmdb_data['button_url'])]])
         if tmdb_data.get('poster_url'): sent_message = await update.message.reply_photo(photo=tmdb_data['poster_url'], caption=caption, parse_mode='Markdown', reply_markup=reply_markup)
         else: sent_message = await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=reply_markup)
-        
         if sent_message:
             asyncio.create_task(schedule_message_deletion(context, sent_message.chat_id, sent_message.message_id, user_message_id, user.first_name))
         return
 
-    # --- Step 3: If all fails ---
-    await update.message.reply_text("Movie not found in my private library or on TMDB for the selected language.")
+    # Step 3: Not found
+    sent_message = await update.message.reply_text("Movie not found in my private library or on TMDB for the selected language.")
+    context.user_data['last_bot_message_id'] = sent_message.message_id
 
 # --- search_tmdb (Unchanged) ---
 async def search_tmdb(query: str, region: str | None = None, lang_code: str | None = None) -> dict | None:
+    # Function is the same as before
     try:
         headers = {"accept": "application/json", "Authorization": f"Bearer {TMDB_API_KEY}"}
         search_url = f"https://api.themoviedb.org/3/search/movie?query={query}&include_adult=false&language=en-US&page=1"
@@ -187,7 +197,7 @@ async def search_tmdb(query: str, region: str | None = None, lang_code: str | No
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.warning('Update "%s" caused error "%s"', update, context.error)
 
-# --- Main function (Adds the reindex command handler) ---
+# --- Main function (Adds listener for edited posts) ---
 def main() -> None:
     if not all([TELEGRAM_TOKEN, TMDB_API_KEY, PRIVATE_CHANNEL_ID, ADMIN_ID]):
         logger.error("One or more required environment variables are missing! (Check ADMIN_ID)")
@@ -197,11 +207,11 @@ def main() -> None:
     if 'movie_index' not in application.bot_data:
         application.bot_data['movie_index'] = {}
         
-    # Add all handlers
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("reindex", reindex_channel)) # NEW admin command
+    application.add_handler(CommandHandler("reindex", reindex_channel))
     application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, update_index))
+    # BUG FIX: Add EDITED_CHANNEL_POST to the handler
+    application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST | filters.UpdateType.EDITED_CHANNEL_POST, update_index))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_media))
     application.add_error_handler(error_handler)
 
