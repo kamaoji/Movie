@@ -1,4 +1,4 @@
-# bot.py (Version 18 - FINAL - Private Channel First Logic)
+# bot.py (Version 12 - Final Bug Fix & Clean Formatting)
 
 import os
 import logging
@@ -7,29 +7,25 @@ import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
-# --- Configuration ---
+# --- Configuration & Logging ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 PRIVATE_CHANNEL_ID = os.environ.get("PRIVATE_CHANNEL_ID")
 
-# --- Logging Setup ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- In-Memory Index (Unchanged) ---
+# --- In-Memory Index ---
 movie_index = {}
 
-# --- Language and Button Data (Unchanged) ---
+# --- Language and Button Data ---
 LANGUAGE_DATA = {
     'en': {'name': 'English', 'region': 'US'}, 'hi': {'name': 'Hindi', 'region': 'IN'},
     'ta': {'name': 'Tamil', 'region': 'IN'}, 'te': {'name': 'Telugu', 'region': 'IN'},
     'es': {'name': 'Spanish', 'region': 'ES'}, 'fr': {'name': 'French', 'region': 'FR'},
 }
 
-# --- Button Keyboard Helpers (Unchanged) ---
+# --- Button Keyboard Helpers ---
 def get_main_menu_keyboard():
     keyboard = [[InlineKeyboardButton("🇮🇳 Hindi", callback_data='lang_hi'), InlineKeyboardButton("🇬🇧 English", callback_data='lang_en')], [InlineKeyboardButton("More Languages 🌍", callback_data='show_more_langs')]]
     return InlineKeyboardMarkup(keyboard)
@@ -38,7 +34,7 @@ def get_more_languages_keyboard():
     keyboard = [[InlineKeyboardButton("Tamil", callback_data='lang_ta'), InlineKeyboardButton("Telugu", callback_data='lang_te')], [InlineKeyboardButton("Spanish", callback_data='lang_es'), InlineKeyboardButton("French", callback_data='lang_fr')], [InlineKeyboardButton("« Back", callback_data='back_to_main')]]
     return InlineKeyboardMarkup(keyboard)
 
-# --- Start and Button Handlers (Unchanged) ---
+# --- Start and Button Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     welcome_message = f"Hey {user.first_name}! 👋 Welcome to the Ultimate Movie Bot! 🎬\n\nI can now search my own private library for you!\n\nChoose your preferred language below to get tailored results! 👇"
@@ -58,10 +54,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lang_name = LANGUAGE_DATA.get(lang_code, {}).get('name', 'selected language')
         await query.edit_message_text(text=f"✅ Great! Your preferred language is set to *{lang_name}*.\n\nNow, send me any movie title to search!", parse_mode='Markdown')
 
-# --- Indexing function (Unchanged from Version 17) ---
+# --- Indexing function with robust regex ---
 async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # This function is now correct from the previous version
     if not update.channel_post or str(update.channel_post.chat.id) != PRIVATE_CHANNEL_ID: return
     caption = update.channel_post.caption
+    if not caption: return
     title_match = re.search(r'#Title\s+([^\n]+)', caption, re.IGNORECASE)
     lang_match = re.search(r'#Lang\s+([a-zA-Z]{2})', caption, re.IGNORECASE)
     if title_match and lang_match:
@@ -69,105 +67,64 @@ async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         lang = lang_match.group(1).strip().lower()
         message_id = update.channel_post.message_id
         index_key = f"{title}_{lang}"
-        extracted_buttons = []
-        for line in caption.split('\n'):
-            if line.strip().lower().startswith('#button'):
-                matches = re.findall(r'\[(.*?)\]\((.*?)\)', line)
-                for text, url in matches:
-                    if text and url: extracted_buttons.append({"text": text.strip(), "url": url.strip()})
-        movie_index[index_key] = { "original_caption": caption, "message_id": message_id, "buttons": extracted_buttons }
-        logger.info(f"Successfully Indexed: Key='{index_key}', Buttons: {len(extracted_buttons)}, Message ID='{message_id}'")
+        movie_index[index_key] = message_id
+        logger.info(f"Successfully Indexed: Key='{index_key}', Message ID='{message_id}'")
         try:
             await context.bot.add_reaction(chat_id=PRIVATE_CHANNEL_ID, message_id=message_id, reaction="👍")
         except Exception as e:
             logger.warning(f"Could not react to message (check permissions): {e}")
 
-# --- MODIFIED: Main search function with CORRECTED logic (Private Channel First) ---
+# --- Main search function ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.message.text.lower().strip()
     user_id = update.effective_user.id
     user_lang_code = context.user_data.get('language')
 
-    # --- Step 1: Search private index FIRST ---
-    if user_lang_code:
-        index_key = f"{query}_{user_lang_code}"
-        movie_data_from_index = movie_index.get(index_key)
-
-        if movie_data_from_index:
-            original_caption = movie_data_from_index.get("original_caption", "")
-            
-            # Clean the caption
-            cleaned_caption_lines = []
-            for line in original_caption.split('\n'):
-                if '#Title' in line or '#Lang' in line or '#Button' in line: continue
-                cleaned_caption_lines.append(line)
-            cleaned_caption = '\n'.join(cleaned_caption_lines).strip()
-
-            # Create custom buttons
-            reply_markup = None
-            stored_buttons = movie_data_from_index.get("buttons", [])
-            if stored_buttons:
-                keyboard = []
-                for btn_data in stored_buttons:
-                    keyboard.append([InlineKeyboardButton(btn_data['text'], url=btn_data['url'])])
-                reply_markup = InlineKeyboardMarkup(keyboard)
-
-            # Get a poster from TMDB to use with our custom data
-            poster_url_from_tmdb = await get_tmdb_poster_only(query)
-
-            logger.info(f"Found in private index! Re-sending '{index_key}' with TMDB poster.")
-            try:
-                if poster_url_from_tmdb:
-                    await context.bot.send_photo(chat_id=user_id, photo=poster_url_from_tmdb, caption=cleaned_caption, reply_markup=reply_markup)
-                else:
-                    await context.bot.send_message(chat_id=user_id, text=cleaned_caption, reply_markup=reply_markup)
-                return # IMPORTANT: Exit after successfully sending from private index
-            except Exception as e:
-                logger.error(f"Failed to re-send message from private index: {e}")
-                # Don't return, let it fall through to TMDB search as a backup
-    
-    # --- Step 2: If not in private index, try TMDB as a fallback ---
+    # --- Step 1: Try TMDB ---
     region = LANGUAGE_DATA.get(user_lang_code, {}).get('region') if user_lang_code else None
     tmdb_data = await search_tmdb(query, region=region, lang_code=user_lang_code)
 
     if tmdb_data:
-        caption = (f"🎬 *{tmdb_data['title']}*\n\n"
-                   f"⭐ *TMDB Rating:* {tmdb_data['rating']}\n"
-                   f"🎭 *Genre:* {tmdb_data['genre']}\n"
-                   f"🌐 *Language:* {tmdb_data['language']}\n"
-                   f"🕒 *Runtime:* {tmdb_data['runtime']}\n"
-                   f"📅 *Release Date:* {tmdb_data['release_date']}")
+        # --- NEW & FIXED: Format TMDB posts to your desired style ---
+        caption = (
+            f"🎬 *{tmdb_data['title']}*\n\n"
+            f"⭐ *TMDB Rating:* {tmdb_data['rating']}\n"
+            f"🎭 *Genre:* {tmdb_data['genre']}\n"
+            f"🌐 *Language:* {tmdb_data['language']}\n"
+            f"🕒 *Runtime:* {tmdb_data['runtime']}\n"
+            # BUG FIX: Use the correct variable name 'tmdb_data' here
+            f"📅 *Release Date:* {tmdb_data['release_date']}"
+        )
+        
         reply_markup = None
         if tmdb_data.get('button_url'):
             keyboard = [[InlineKeyboardButton(f"More Info on {tmdb_data['source']}", url=tmdb_data['button_url'])]]
             reply_markup = InlineKeyboardMarkup(keyboard)
+
         if tmdb_data.get('poster_url'):
             await update.message.reply_photo(photo=tmdb_data['poster_url'], caption=caption, parse_mode='Markdown', reply_markup=reply_markup)
         else:
             await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=reply_markup)
         return
 
+    # --- Step 2: Search private index ---
+    if user_lang_code:
+        index_key = f"{query}_{user_lang_code}"
+        message_id_to_forward = movie_index.get(index_key)
+        if message_id_to_forward:
+            logger.info(f"Found in private index! Forwarding message ID: {message_id_to_forward}")
+            try:
+                await context.bot.forward_message(chat_id=user_id, from_chat_id=PRIVATE_CHANNEL_ID, message_id=message_id_to_forward)
+                return
+            except Exception as e:
+                logger.error(f"Failed to forward message: {e}")
+                await update.message.reply_text("I found the movie, but couldn't forward it. Check my admin permissions.")
+                return
+
     # --- Step 3: If all fails ---
-    await update.message.reply_text("Movie not found in my private library or on TMDB.")
+    await update.message.reply_text("Movie not found in TMDB or my private library for the selected language.")
 
-
-# --- Helper functions (Unchanged) ---
-async def get_tmdb_poster_only(query: str) -> str | None:
-    try:
-        headers = {"accept": "application/json", "Authorization": f"Bearer {TMDB_API_KEY}"}
-        search_url = f"https://api.themoviedb.org/3/search/movie?query={query}&include_adult=false&language=en-US&page=1"
-        response = requests.get(search_url, headers=headers)
-        response.raise_for_status()
-        search_data = response.json()
-        if search_data.get("results"):
-            poster_path = search_data["results"][0].get("poster_path")
-            if poster_path:
-                return f"https://image.tmdb.org/t/p/w500{poster_path}"
-        return None
-    except Exception as e:
-        logger.error(f"TMDB poster-only search failed: {e}")
-        return None
-
+# --- search_tmdb function (Unchanged) ---
 async def search_tmdb(query: str, region: str | None = None, lang_code: str | None = None) -> dict | None:
     try:
         headers = {"accept": "application/json", "Authorization": f"Bearer {TMDB_API_KEY}"}
