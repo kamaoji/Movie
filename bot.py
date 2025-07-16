@@ -1,4 +1,4 @@
-# bot.py (Version 15 - Buttons for Private Channel Posts)
+# bot.py (Version 16 - Custom Buttons for Private Channel Posts)
 
 import os
 import logging
@@ -19,8 +19,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- In-Memory Index (MODIFIED SLIGHTLY to ensure message_id is always there) ---
-movie_index = {} 
+# --- In-Memory Index (MODIFIED to store button data) ---
+movie_index = {} # Example: {"title_lang": {"file_id": "...", "file_type": "photo", "original_caption": "...", "buttons": [{"text": "...", "url": "..."}]}}
 
 # --- Language and Button Data (Unchanged) ---
 LANGUAGE_DATA = {
@@ -58,7 +58,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lang_name = LANGUAGE_DATA.get(lang_code, {}).get('name', 'selected language')
         await query.edit_message_text(text=f"✅ Great! Your preferred language is set to *{lang_name}*.\n\nNow, send me any movie title to search!", parse_mode='Markdown')
 
-# --- MODIFIED: Indexing function now ensures message_id is stored ---
+# --- MODIFIED: Indexing function now extracts and stores button data ---
 async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.channel_post or str(update.channel_post.chat.id) != PRIVATE_CHANNEL_ID: return
     caption = update.channel_post.caption
@@ -80,23 +80,34 @@ async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         elif update.channel_post.video:
             file_id = update.channel_post.video.file_id
             file_type = "video"
-        elif update.channel_post.document: # Handle documents (like .mp4 files if not video type)
+        elif update.channel_post.document: 
             file_id = update.channel_post.document.file_id
             file_type = "document"
+
+        # --- NEW: Extract button data ---
+        extracted_buttons = []
+        for line in caption.split('\n'):
+            if line.strip().lower().startswith('#button'):
+                # Regex to find [Text](URL) pairs in the line
+                matches = re.findall(r'\[(.*?)\]\((.*?)\)', line)
+                for text, url in matches:
+                    if text and url:
+                        extracted_buttons.append({"text": text.strip(), "url": url.strip()})
 
         movie_index[index_key] = {
             "file_id": file_id,
             "file_type": file_type,
-            "original_caption": caption, # Store the entire original caption
-            "message_id": message_id # Ensure message_id is stored for the button URL
+            "original_caption": caption, # Store the entire original caption for cleaning later
+            "message_id": message_id,
+            "buttons": extracted_buttons # Store the extracted buttons
         }
-        logger.info(f"Successfully Indexed: Key='{index_key}', Type='{file_type}', Message ID='{message_id}'")
+        logger.info(f"Successfully Indexed: Key='{index_key}', Type='{file_type}', Buttons: {len(extracted_buttons)}, Message ID='{message_id}'")
         try:
             await context.bot.add_reaction(chat_id=PRIVATE_CHANNEL_ID, message_id=message_id, reaction="👍")
         except Exception as e:
             logger.warning(f"Could not react to message (check permissions): {e}")
 
-# --- MODIFIED: Main search function to add button for channel posts ---
+# --- MODIFIED: Main search function to use custom buttons from index ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.message.text.lower().strip()
     user_id = update.effective_user.id
@@ -107,7 +118,7 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     tmdb_data = await search_tmdb(query, region=region, lang_code=user_lang_code)
 
     if tmdb_data:
-        # TMDB output format (uses Markdown as before)
+        # TMDB output format (unchanged, uses Markdown)
         caption = (
             f"🎬 *{tmdb_data['title']}*\n\n"
             f"⭐ *TMDB Rating:* {tmdb_data['rating']}\n"
@@ -128,7 +139,7 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=reply_markup)
         return
 
-    # --- Step 2: Search private index (MODIFIED: ADD BUTTON) ---
+    # --- Step 2: Search private index (MODIFIED: Uses stored custom buttons) ---
     if user_lang_code:
         index_key = f"{query}_{user_lang_code}"
         movie_data_from_index = movie_index.get(index_key)
@@ -137,24 +148,22 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             file_id = movie_data_from_index.get("file_id")
             file_type = movie_data_from_index.get("file_type")
             original_caption = movie_data_from_index.get("original_caption", "")
-            message_id_from_index = movie_data_from_index.get("message_id") # Get the stored message ID
-
-            # --- Clean the caption: remove #Title and #Lang lines ---
+            
+            # --- Clean the caption: remove #Title, #Lang, and #Button lines ---
             cleaned_caption_lines = []
             for line in original_caption.split('\n'):
-                if '#Title' in line or '#Lang' in line:
+                if '#Title' in line or '#Lang' in line or '#Button' in line: # Also remove #Button lines
                     continue
                 cleaned_caption_lines.append(line)
             cleaned_caption = '\n'.join(cleaned_caption_lines).strip()
 
-            # --- NEW: Create button for private channel post ---
+            # --- NEW: Create buttons from stored data ---
             reply_markup = None
-            if message_id_from_index:
-                # Remove the -100 prefix from PRIVATE_CHANNEL_ID for the t.me/c/ link
-                # (if it's a supergroup ID, it usually starts with -100)
-                channel_link_id = PRIVATE_CHANNEL_ID.replace('-100', '') 
-                channel_post_url = f"https://t.me/c/{channel_link_id}/{message_id_from_index}"
-                keyboard = [[InlineKeyboardButton("View Original Post", url=channel_post_url)]]
+            stored_buttons = movie_data_from_index.get("buttons", [])
+            if stored_buttons:
+                keyboard = []
+                for btn_data in stored_buttons:
+                    keyboard.append([InlineKeyboardButton(btn_data['text'], url=btn_data['url'])])
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
             logger.info(f"Found in private index! Re-sending '{index_key}'.")
@@ -166,7 +175,7 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     await context.bot.send_video(chat_id=user_id, video=file_id, caption=cleaned_caption, reply_markup=reply_markup)
                 elif file_id and file_type == "document":
                      await context.bot.send_document(chat_id=user_id, document=file_id, caption=cleaned_caption, reply_markup=reply_markup)
-                else: # Fallback for text-only posts or if media type isn't handled
+                else: 
                     await context.bot.send_message(chat_id=user_id, text=cleaned_caption, reply_markup=reply_markup)
                 return 
             except Exception as e:
