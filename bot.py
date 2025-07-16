@@ -1,27 +1,25 @@
-# bot.py (Version 13 - Clean Private Channel Output)
+# bot.py (Version 14 - The Final, Persistent Version)
 
 import os
 import logging
 import requests
 import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+# NEW: Import the persistence class
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters,
+    ContextTypes, CallbackQueryHandler, PicklePersistence
+)
 
-# --- Configuration ---
+# --- Configuration & Logging (Unchanged) ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 PRIVATE_CHANNEL_ID = os.environ.get("PRIVATE_CHANNEL_ID")
 
-# --- Logging Setup ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- In-Memory Index (MODIFIED STRUCTURE) ---
-# Now stores file_id, file_type, and original_caption for re-sending
-movie_index = {} # Example: {"title_lang": {"file_id": "...", "file_type": "photo", "original_caption": "..."}}
+# --- We no longer need a global movie_index. It will be stored in the bot's persistent memory. ---
 
 # --- Language and Button Data (Unchanged) ---
 LANGUAGE_DATA = {
@@ -30,7 +28,6 @@ LANGUAGE_DATA = {
     'es': {'name': 'Spanish', 'region': 'ES'}, 'fr': {'name': 'French', 'region': 'FR'},
 }
 
-# --- Button Keyboard Helpers (Unchanged) ---
 def get_main_menu_keyboard():
     keyboard = [[InlineKeyboardButton("🇮🇳 Hindi", callback_data='lang_hi'), InlineKeyboardButton("🇬🇧 English", callback_data='lang_en')], [InlineKeyboardButton("More Languages 🌍", callback_data='show_more_langs')]]
     return InlineKeyboardMarkup(keyboard)
@@ -40,9 +37,10 @@ def get_more_languages_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 # --- Start and Button Handlers (Unchanged) ---
+# The logic here is the same, but context.user_data is now persistent!
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    welcome_message = f"Hey {user.first_name}! 👋 Welcome to the Ultimate Movie Bot! 🎬\n\nI can now search my own private library for you!\n\nChoose your preferred language below to get tailored results! 👇"
+    welcome_message = f"Hey {user.first_name}! 👋 Welcome to the Ultimate Movie Bot! 🎬\n\nI can now remember your choices permanently!\n\nChoose your preferred language below. 👇"
     await update.message.reply_text(welcome_message, reply_markup=get_main_menu_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -57,9 +55,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lang_code = data.split('_')[1]
         context.user_data['language'] = lang_code
         lang_name = LANGUAGE_DATA.get(lang_code, {}).get('name', 'selected language')
-        await query.edit_message_text(text=f"✅ Great! Your preferred language is set to *{lang_name}*.\n\nNow, send me any movie title to search!", parse_mode='Markdown')
+        await query.edit_message_text(text=f"✅ Great! Your preferred language is now permanently set to *{lang_name}*.\n\nSend me any movie title to search!", parse_mode='Markdown')
 
-# --- MODIFIED: Indexing function now stores more data ---
+# --- MODIFIED: Indexing function now uses persistent bot_data ---
 async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.channel_post or str(update.channel_post.chat.id) != PRIVATE_CHANNEL_ID: return
     caption = update.channel_post.caption
@@ -70,104 +68,79 @@ async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if title_match and lang_match:
         title = title_match.group(1).strip().lower()
         lang = lang_match.group(1).strip().lower()
-        message_id = update.channel_post.message_id # Keep message_id for logging/debug
+        message_id = update.channel_post.message_id
         index_key = f"{title}_{lang}"
 
-        file_id = None
-        file_type = None
+        file_id, file_type = (None, None)
         if update.channel_post.photo:
-            file_id = update.channel_post.photo[-1].file_id # Get the largest photo
-            file_type = "photo"
+            file_id, file_type = update.channel_post.photo[-1].file_id, "photo"
         elif update.channel_post.video:
-            file_id = update.channel_post.video.file_id
-            file_type = "video"
-        elif update.channel_post.document: # Handle documents (like .mp4 files if not video type)
-            file_id = update.channel_post.document.file_id
-            file_type = "document"
+            file_id, file_type = update.channel_post.video.file_id, "video"
+        elif update.channel_post.document:
+            file_id, file_type = update.channel_post.document.file_id, "document"
 
-        movie_index[index_key] = {
-            "file_id": file_id,
-            "file_type": file_type,
-            "original_caption": caption # Store the entire original caption
+        # Store the data in context.bot_data, which is now persistent
+        context.bot_data['movie_index'][index_key] = {
+            "file_id": file_id, "file_type": file_type, "original_caption": caption
         }
-        logger.info(f"Successfully Indexed: Key='{index_key}', Type='{file_type}', Message ID='{message_id}'")
+        logger.info(f"Successfully Indexed (Persistently): Key='{index_key}', Type='{file_type}'")
         try:
             await context.bot.add_reaction(chat_id=PRIVATE_CHANNEL_ID, message_id=message_id, reaction="👍")
         except Exception as e:
-            logger.warning(f"Could not react to message (check permissions): {e}")
+            logger.warning(f"Could not react to message: {e}")
 
-# --- MODIFIED: Main search function to re-send from private index ---
+# --- MODIFIED: Main search function now uses persistent data ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.message.text.lower().strip()
     user_id = update.effective_user.id
+    # This now reads from the persistent user_data file
     user_lang_code = context.user_data.get('language')
 
     # --- Step 1: Try TMDB ---
     region = LANGUAGE_DATA.get(user_lang_code, {}).get('region') if user_lang_code else None
     tmdb_data = await search_tmdb(query, region=region, lang_code=user_lang_code)
-
     if tmdb_data:
-        # TMDB output format (unchanged, already clean)
-        caption = (
-            f"🎬 *{tmdb_data['title']}*\n\n"
-            f"⭐ *TMDB Rating:* {tmdb_data['rating']}\n"
-            f"🎭 *Genre:* {tmdb_data['genre']}\n"
-            f"🌐 *Language:* {tmdb_data['language']}\n"
-            f"🕒 *Runtime:* {tmdb_data['runtime']}\n"
-            f"📅 *Release Date:* {tmdb_data['release_date']}"
-        )
-        
+        caption = (f"🎬 *{tmdb_data['title']}*\n\n"
+                   f"⭐ *TMDB Rating:* {tmdb_data['rating']}\n"
+                   f"🎭 *Genre:* {tmdb_data['genre']}\n"
+                   f"🌐 *Language:* {tmdb_data['language']}\n"
+                   f"🕒 *Runtime:* {tmdb_data['runtime']}\n"
+                   f"📅 *Release Date:* {tmdb_data['release_date']}")
         reply_markup = None
         if tmdb_data.get('button_url'):
             keyboard = [[InlineKeyboardButton(f"More Info on {tmdb_data['source']}", url=tmdb_data['button_url'])]]
             reply_markup = InlineKeyboardMarkup(keyboard)
-
         if tmdb_data.get('poster_url'):
             await update.message.reply_photo(photo=tmdb_data['poster_url'], caption=caption, parse_mode='Markdown', reply_markup=reply_markup)
         else:
             await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=reply_markup)
         return
 
-    # --- Step 2: Search private index (MODIFIED to re-send, not forward) ---
+    # --- Step 2: Search persistent private index ---
     if user_lang_code:
         index_key = f"{query}_{user_lang_code}"
+        # Read the movie index from the persistent bot_data
+        movie_index = context.bot_data.get('movie_index', {})
         movie_data_from_index = movie_index.get(index_key)
-
         if movie_data_from_index:
-            file_id = movie_data_from_index.get("file_id")
-            file_type = movie_data_from_index.get("file_type")
-            original_caption = movie_data_from_index.get("original_caption", "")
-
-            # --- Clean the caption: remove #Title and #Lang lines/tags ---
-            cleaned_caption_lines = []
-            for line in original_caption.split('\n'):
-                # Skip lines containing these tags for cleaner output
-                if '#Title' in line or '#Lang' in line:
-                    continue
-                cleaned_caption_lines.append(line)
-            cleaned_caption = '\n'.join(cleaned_caption_lines).strip()
-
-            logger.info(f"Found in private index! Re-sending '{index_key}'.")
+            file_id, file_type, original_caption = movie_data_from_index.get("file_id"), movie_data_from_index.get("file_type"), movie_data_from_index.get("original_caption", "")
+            cleaned_caption = '\n'.join([line for line in original_caption.split('\n') if '#Title' not in line and '#Lang' not in line]).strip()
+            logger.info(f"Found in persistent private index! Re-sending '{index_key}'.")
             try:
-                # Send based on file type
-                if file_id and file_type == "photo":
-                    await context.bot.send_photo(chat_id=user_id, photo=file_id, caption=cleaned_caption, parse_mode='Markdown')
-                elif file_id and file_type == "video":
-                    await context.bot.send_video(chat_id=user_id, video=file_id, caption=cleaned_caption, parse_mode='Markdown')
-                elif file_id and file_type == "document":
-                     await context.bot.send_document(chat_id=user_id, document=file_id, caption=cleaned_caption, parse_mode='Markdown')
-                else: # Fallback for text-only posts or if media type isn't handled
-                    await context.bot.send_message(chat_id=user_id, text=cleaned_caption, parse_mode='Markdown')
-                return # Success!
+                if file_type == "photo": await context.bot.send_photo(chat_id=user_id, photo=file_id, caption=cleaned_caption, parse_mode='Markdown')
+                elif file_type == "video": await context.bot.send_video(chat_id=user_id, video=file_id, caption=cleaned_caption, parse_mode='Markdown')
+                elif file_type == "document": await context.bot.send_document(chat_id=user_id, document=file_id, caption=cleaned_caption, parse_mode='Markdown')
+                else: await context.bot.send_message(chat_id=user_id, text=cleaned_caption, parse_mode='Markdown')
+                return
             except Exception as e:
-                logger.error(f"Failed to re-send message from private index: {e}")
-                await update.message.reply_text("I found the movie in my library, but couldn't send it. There might be an issue with the post content or my permissions.")
+                logger.error(f"Failed to re-send message from persistent index: {e}")
+                await update.message.reply_text("I found the movie in my library, but couldn't send it.")
                 return
 
     # --- Step 3: If all fails ---
     await update.message.reply_text("Movie not found in TMDB or my private library for the selected language.")
 
-# --- search_tmdb function (Unchanged) ---
+# --- search_tmdb (Unchanged) ---
 async def search_tmdb(query: str, region: str | None = None, lang_code: str | None = None) -> dict | None:
     try:
         headers = {"accept": "application/json", "Authorization": f"Bearer {TMDB_API_KEY}"}
@@ -194,20 +167,40 @@ async def search_tmdb(query: str, region: str | None = None, lang_code: str | No
         logger.error(f"TMDB search failed: {e}")
         return None
 
-# --- Error Handler & Main function (Unchanged) ---
+# --- Error Handler (Unchanged) ---
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.warning('Update "%s" caused error "%s"', update, context.error)
 
+# --- MODIFIED: main function now sets up persistence ---
 def main() -> None:
     if not all([TELEGRAM_TOKEN, TMDB_API_KEY, PRIVATE_CHANNEL_ID]):
         logger.error("One or more required environment variables are missing!")
         return
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # NEW: Create a persistence object. The file will be saved on Render's disk.
+    # This will store user_data, chat_data, and bot_data.
+    persistence = PicklePersistence(filepath="bot_persistence.pkl")
+
+    # Build the application with the persistence object
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .persistence(persistence)
+        .build()
+    )
+
+    # NEW: Initialize the movie index in the persistent bot_data if it doesn't exist
+    if 'movie_index' not in application.bot_data:
+        application.bot_data['movie_index'] = {}
+
+    # Add handlers (Unchanged)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, update_index))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_media))
     application.add_error_handler(error_handler)
+
+    # Webhook setup (Unchanged)
     PORT = int(os.environ.get('PORT', 8443))
     APP_NAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
     if not APP_NAME:
