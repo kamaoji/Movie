@@ -1,9 +1,10 @@
-# bot.py (Version 17 - Final Fix for JobQueue)
+# bot.py (Version 18 - Final Fix with asyncio for Deletion)
 
 import os
 import logging
 import requests
 import re
+import asyncio # Import the asyncio library
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters,
@@ -33,17 +34,17 @@ def get_more_languages_keyboard():
     keyboard = [[InlineKeyboardButton("Tamil", callback_data='lang_ta'), InlineKeyboardButton("Telugu", callback_data='lang_te')], [InlineKeyboardButton("Spanish", callback_data='lang_es'), InlineKeyboardButton("French", callback_data='lang_fr')], [InlineKeyboardButton("« Back", callback_data='back_to_main')]]
     return InlineKeyboardMarkup(keyboard)
 
-# --- Deletion Job Function ---
-async def delete_message_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    job = context.job
-    chat_id, message_id, user_name = job.data['chat_id'], job.data['message_id'], job.data.get('user_name', 'there')
+# --- NEW: Asynchronous function to handle message deletion ---
+async def schedule_message_deletion(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, user_name: str, delay: int = 60):
+    """Schedules a message to be deleted after a delay using asyncio."""
+    await asyncio.sleep(delay) # Non-blocking sleep for 60 seconds
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
         logger.info(f"Auto-deleted message {message_id} in chat {chat_id}.")
-        confirmation_text = f"Hey {user_name},\n\nYour previous request has been deleted to avoid clutter. 👍\n\nFeel free to make a new request! ❤️"
+        confirmation_text = f"Hey {user_name},\n\nYour previous request has been deleted to avoid clutter. 👍"
         await context.bot.send_message(chat_id=chat_id, text=confirmation_text)
     except Exception as e:
-        logger.warning(f"Could not delete message {message_id}: {e}")
+        logger.warning(f"Could not delete message {message_id} in chat {chat_id} (maybe already deleted): {e}")
 
 # --- Bot Handlers (Start & Button) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -130,7 +131,8 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     logger.error(f"Failed to re-send message from index: {e}"); await update.message.reply_text("I found the movie in my library, but couldn't send it.")
 
     if sent_message:
-        context.application.job_queue.run_once(delete_message_job, 60, data={'chat_id': sent_message.chat_id, 'message_id': sent_message.message_id, 'user_name': user.first_name}, name=f"delete_{sent_message.message_id}")
+        # Create a "fire and forget" task for the deletion
+        asyncio.create_task(schedule_message_deletion(context, sent_message.chat_id, sent_message.message_id, user.first_name))
     elif not tmdb_data:
         await update.message.reply_text("Movie not found in TMDB or my private library for the selected language.")
 
@@ -170,14 +172,9 @@ def main() -> None:
         logger.error("One or more required environment variables are missing!")
         return
     persistence = PicklePersistence(filepath="bot_persistence.pkl")
-    
-    # --- THIS IS THE FIX ---
-    # The .job_queue() call is removed. The application has a job queue by default.
     application = (Application.builder().token(TELEGRAM_TOKEN).persistence(persistence).build())
-
     if 'movie_index' not in application.bot_data:
         application.bot_data['movie_index'] = {}
-        
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, update_index))
