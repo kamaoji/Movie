@@ -1,4 +1,4 @@
-# bot.py (Version 17 - Robust Indexing with File ID Persistence)
+# bot.py (Version 17 - TMDB Photo Workaround for Private Posts)
 
 import os
 import logging
@@ -19,8 +19,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- In-Memory Index (Unchanged Structure, but now persists file_id better) ---
-movie_index = {} 
+# --- In-Memory Index (Unchanged) ---
+movie_index = {}
 
 # --- Language and Button Data (Unchanged) ---
 LANGUAGE_DATA = {
@@ -58,74 +58,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lang_name = LANGUAGE_DATA.get(lang_code, {}).get('name', 'selected language')
         await query.edit_message_text(text=f"✅ Great! Your preferred language is set to *{lang_name}*.\n\nNow, send me any movie title to search!", parse_mode='Markdown')
 
-# --- MODIFIED: Indexing function now handles new posts AND edits ---
+# --- Indexing function (Unchanged from Version 16) ---
 async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Determine if it's a new post or an edited post
-    # The 'update' object will have either 'channel_post' or 'edited_channel_post'
-    channel_post_obj = update.channel_post if update.channel_post else update.edited_channel_post
-
-    if not channel_post_obj or str(channel_post_obj.chat.id) != PRIVATE_CHANNEL_ID:
-        return # Not from our target channel or not a post
-
-    caption = channel_post_obj.caption
-    if not caption: # Caption is mandatory for indexing
-        return
-
+    if not update.channel_post or str(update.channel_post.chat.id) != PRIVATE_CHANNEL_ID: return
+    caption = update.channel_post.caption
     title_match = re.search(r'#Title\s+([^\n]+)', caption, re.IGNORECASE)
     lang_match = re.search(r'#Lang\s+([a-zA-Z]{2})', caption, re.IGNORECASE)
-    
     if title_match and lang_match:
         title = title_match.group(1).strip().lower()
         lang = lang_match.group(1).strip().lower()
-        message_id = channel_post_obj.message_id 
+        message_id = update.channel_post.message_id
         index_key = f"{title}_{lang}"
-
-        # Retrieve existing data if the movie is already indexed (for edited posts)
-        existing_data = movie_index.get(index_key, {})
-
-        # Try to get file_id and type from the *current* update object
-        # This will be present for new posts, but might be None for edited posts
-        current_file_id = None
-        current_file_type = None
-        if channel_post_obj.photo:
-            current_file_id = channel_post_obj.photo[-1].file_id
-            current_file_type = "photo"
-        elif channel_post_obj.video:
-            current_file_id = channel_post_obj.video.file_id
-            current_file_type = "video"
-        elif channel_post_obj.document: 
-            current_file_id = channel_post_obj.document.file_id
-            current_file_type = "document"
-        
-        # DETERMINE FINAL file_id and file_type to store:
-        # Prioritize 'current_file_id' (from a new post or an edit that included media),
-        # otherwise use 'existing_data.get("file_id")' (from a previous index operation)
-        final_file_id = current_file_id if current_file_id else existing_data.get("file_id")
-        final_file_type = current_file_type if current_file_type else existing_data.get("file_type")
-
-        # --- Extract button data (unchanged logic) ---
         extracted_buttons = []
         for line in caption.split('\n'):
             if line.strip().lower().startswith('#button'):
                 matches = re.findall(r'\[(.*?)\]\((.*?)\)', line)
                 for text, url in matches:
-                    if text and url:
-                        extracted_buttons.append({"text": text.strip(), "url": url.strip()})
-
-        movie_index[index_key] = {
-            "file_id": final_file_id,          # Store the (preserved or new) file_id
-            "file_type": final_file_type,      # Store the (preserved or new) file_type
-            "original_caption": caption,       # Store the entire original caption
-            "message_id": message_id,          # Message ID
-            "buttons": extracted_buttons       # Stored custom buttons
-        }
-        logger.info(f"Successfully Indexed (or Updated): Key='{index_key}', Type='{final_file_type}', Buttons: {len(extracted_buttons)}, Message ID='{message_id}'")
+                    if text and url: extracted_buttons.append({"text": text.strip(), "url": url.strip()})
+        movie_index[index_key] = { "original_caption": caption, "message_id": message_id, "buttons": extracted_buttons }
+        logger.info(f"Successfully Indexed: Key='{index_key}', Buttons: {len(extracted_buttons)}, Message ID='{message_id}'")
         try:
             await context.bot.add_reaction(chat_id=PRIVATE_CHANNEL_ID, message_id=message_id, reaction="👍")
         except Exception as e:
             logger.warning(f"Could not react to message (check permissions): {e}")
 
-# --- Main search function (Unchanged from Version 15) ---
+# --- MODIFIED: Main search function with TMDB Photo Workaround ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.message.text.lower().strip()
     user_id = update.effective_user.id
@@ -136,41 +93,39 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     tmdb_data = await search_tmdb(query, region=region, lang_code=user_lang_code)
 
     if tmdb_data:
+        # TMDB output format (unchanged)
         caption = (f"🎬 *{tmdb_data['title']}*\n\n"
                    f"⭐ *TMDB Rating:* {tmdb_data['rating']}\n"
                    f"🎭 *Genre:* {tmdb_data['genre']}\n"
                    f"🌐 *Language:* {tmdb_data['language']}\n"
                    f"🕒 *Runtime:* {tmdb_data['runtime']}\n"
                    f"📅 *Release Date:* {tmdb_data['release_date']}")
-        
         reply_markup = None
         if tmdb_data.get('button_url'):
             keyboard = [[InlineKeyboardButton(f"More Info on {tmdb_data['source']}", url=tmdb_data['button_url'])]]
             reply_markup = InlineKeyboardMarkup(keyboard)
-
         if tmdb_data.get('poster_url'):
             await update.message.reply_photo(photo=tmdb_data['poster_url'], caption=caption, parse_mode='Markdown', reply_markup=reply_markup)
         else:
             await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=reply_markup)
         return
 
-    # --- Step 2: Search private index (Unchanged, now relies on updated movie_index) ---
+    # --- Step 2: Search private index (MODIFIED with TMDB Photo Workaround) ---
     if user_lang_code:
         index_key = f"{query}_{user_lang_code}"
         movie_data_from_index = movie_index.get(index_key)
 
         if movie_data_from_index:
-            file_id = movie_data_from_index.get("file_id")
-            file_type = movie_data_from_index.get("file_type")
             original_caption = movie_data_from_index.get("original_caption", "")
             
+            # --- Clean the caption: remove #Title, #Lang, and #Button lines ---
             cleaned_caption_lines = []
             for line in original_caption.split('\n'):
-                if '#Title' in line or '#Lang' in line or '#Button' in line:
-                    continue
+                if '#Title' in line or '#Lang' in line or '#Button' in line: continue
                 cleaned_caption_lines.append(line)
             cleaned_caption = '\n'.join(cleaned_caption_lines).strip()
 
+            # --- Create custom buttons ---
             reply_markup = None
             stored_buttons = movie_data_from_index.get("buttons", [])
             if stored_buttons:
@@ -179,28 +134,46 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     keyboard.append([InlineKeyboardButton(btn_data['text'], url=btn_data['url'])])
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
-            logger.info(f"Found in private index! Re-sending '{index_key}'.")
+            # --- NEW: Get a poster from TMDB to use with our custom data ---
+            poster_url_from_tmdb = await get_tmdb_poster_only(query)
+
+            logger.info(f"Found in private index! Re-sending '{index_key}' with TMDB poster.")
             try:
-                if file_id and file_type == "photo":
-                    await context.bot.send_photo(chat_id=user_id, photo=file_id, caption=cleaned_caption, reply_markup=reply_markup)
-                elif file_id and file_type == "video":
-                    await context.bot.send_video(chat_id=user_id, video=file_id, caption=cleaned_caption, reply_markup=reply_markup)
-                elif file_id and file_type == "document":
-                     await context.bot.send_document(chat_id=user_id, document=file_id, caption=cleaned_caption, reply_markup=reply_markup)
-                else: 
+                if poster_url_from_tmdb:
+                    # Send the TMDB photo with our custom caption and buttons
+                    await context.bot.send_photo(chat_id=user_id, photo=poster_url_from_tmdb, caption=cleaned_caption, reply_markup=reply_markup)
+                else:
+                    # If no poster is found, send the custom text and buttons
                     await context.bot.send_message(chat_id=user_id, text=cleaned_caption, reply_markup=reply_markup)
                 return 
             except Exception as e:
                 logger.error(f"Failed to re-send message from private index: {e}")
-                # Specifically check for 'file_id is empty' in logs to confirm this fix addresses it.
                 await update.message.reply_text("I found the movie in my library, but couldn't send it. There might be an issue with the post content or my permissions.")
                 return
 
     # --- Step 3: If all fails ---
     await update.message.reply_text("Movie not found in TMDB or my private library for the selected language.")
 
+# --- NEW: Helper function to get ONLY the poster URL from TMDB ---
+async def get_tmdb_poster_only(query: str) -> str | None:
+    try:
+        headers = {"accept": "application/json", "Authorization": f"Bearer {TMDB_API_KEY}"}
+        search_url = f"https://api.themoviedb.org/3/search/movie?query={query}&include_adult=false&language=en-US&page=1"
+        response = requests.get(search_url, headers=headers)
+        response.raise_for_status()
+        search_data = response.json()
+        if search_data.get("results"):
+            poster_path = search_data["results"][0].get("poster_path")
+            if poster_path:
+                return f"https://image.tmdb.org/t/p/w500{poster_path}"
+        return None
+    except Exception as e:
+        logger.error(f"TMDB poster-only search failed: {e}")
+        return None
+
 # --- search_tmdb function (Unchanged) ---
 async def search_tmdb(query: str, region: str | None = None, lang_code: str | None = None) -> dict | None:
+    # This is still needed for the primary search path
     try:
         headers = {"accept": "application/json", "Authorization": f"Bearer {TMDB_API_KEY}"}
         search_url = f"https://api.themoviedb.org/3/search/movie?query={query}&include_adult=false&language=en-US&page=1"
@@ -226,7 +199,7 @@ async def search_tmdb(query: str, region: str | None = None, lang_code: str | No
         logger.error(f"TMDB search failed: {e}")
         return None
 
-# --- Error Handler & Main function (MODIFIED: Add EDITED_CHANNEL_POST handler) ---
+# --- Error Handler & Main function (Unchanged) ---
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.warning('Update "%s" caused error "%s"', update, context.error)
 
@@ -237,10 +210,7 @@ def main() -> None:
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
-    
-    # Listen to BOTH new channel posts AND edited channel posts for indexing
-    application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST | filters.UpdateType.EDITED_CHANNEL_POST, update_index))
-    
+    application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, update_index))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_media))
     application.add_error_handler(error_handler)
     PORT = int(os.environ.get('PORT', 8443))
