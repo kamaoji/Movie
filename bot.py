@@ -1,4 +1,4 @@
-# bot.py (Version 16 - Advanced Button Parsing)
+# bot.py (Version 15 - Auto URL Buttons & Indexing Fix)
 
 import os
 import logging
@@ -50,23 +50,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lang_name = LANGUAGE_DATA.get(lang_code, {}).get('name', 'selected language')
         await query.edit_message_text(text=f"✅ Great! Your preferred language is now permanently set to *{lang_name}*.\n\nSend me any movie title to search!", parse_mode='Markdown')
 
-# --- Indexing function (Unchanged from Version 15) ---
+# --- MODIFIED: Indexing function with BUG FIX for text messages ---
 async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.channel_post or str(update.channel_post.chat.id) != PRIVATE_CHANNEL_ID: return
+    
     post = update.channel_post
-    caption = post.caption if post.caption else post.text
+    caption = post.caption if post.caption else post.text # BUG FIX: Also read from post.text
     if not caption: return
+
     title_match = re.search(r'#Title\s+([^\n]+)', caption, re.IGNORECASE)
     lang_match = re.search(r'#Lang\s+([a-zA-Z]{2})', caption, re.IGNORECASE)
+    
     if title_match and lang_match:
         title = title_match.group(1).strip().lower()
         lang = lang_match.group(1).strip().lower()
         index_key = f"{title}_{lang}"
+
         file_id, file_type = (None, None)
+        # BUG FIX: Handle text posts with web page previews (like your "Evil Dead Rise" post)
         if post.photo: file_id, file_type = post.photo[-1].file_id, "photo"
         elif post.video: file_id, file_type = post.video.file_id, "video"
         elif post.document: file_id, file_type = post.document.file_id, "document"
-        elif post.text: file_type = "text"
+        elif post.text: file_type = "text" # Explicitly mark as a text post
+
         context.bot_data.setdefault('movie_index', {})[index_key] = {
             "file_id": file_id, "file_type": file_type, "original_caption": caption
         }
@@ -76,28 +82,33 @@ async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception as e:
             logger.warning(f"Could not react to message: {e}")
 
-# --- NEW: Advanced button and caption parser for private posts ---
-def parse_private_post(original_caption: str) -> (str, InlineKeyboardMarkup | None):
-    """Parses a caption for markdown links, creates buttons, and returns a clean caption."""
-    # Regex to find markdown links: [text](url)
-    markdown_link_regex = r'\[([^\]]+)\]\((https?://[^\s\)]+)\)'
-    
+# --- NEW: Helper function to create auto buttons ---
+def create_url_buttons_from_caption(caption: str) -> (str, InlineKeyboardMarkup | None):
+    """Parses a caption, extracts URLs, creates buttons, and returns a cleaned caption."""
+    lines = caption.split('\n')
+    cleaned_lines = []
     buttons = []
-    # Find all button definitions in the caption
-    matches = re.findall(markdown_link_regex, original_caption)
-    for text, url in matches:
-        buttons.append([InlineKeyboardButton(text.strip(), url=url.strip())])
+    # URL regex to find http/https links
+    url_regex = r'https?://[^\s]+'
 
-    # Clean the caption: remove indexing tags and markdown link definitions
-    cleaned_caption = re.sub(markdown_link_regex, '', original_caption) # Remove the button links
-    final_caption_lines = []
-    for line in cleaned_caption.split('\n'):
-        if '#Title' not in line and '#Lang' not in line:
-            final_caption_lines.append(line)
-    
-    final_caption = '\n'.join(final_caption_lines).strip()
-    
-    return final_caption, InlineKeyboardMarkup(buttons) if buttons else None
+    for i, line in enumerate(lines):
+        if re.search(url_regex, line):
+            # The line contains a URL. Use the previous line as the button label.
+            if i > 0 and not re.search(url_regex, lines[i-1]):
+                button_label = lines[i-1].strip()
+                # Find all URLs in the current line (though usually just one)
+                urls = re.findall(url_regex, line)
+                for url in urls:
+                    buttons.append([InlineKeyboardButton(button_label, url=url)])
+            # We don't add the URL line itself to the cleaned caption
+        elif i + 1 < len(lines) and re.search(url_regex, lines[i+1]):
+            # This is a label line for a URL on the next line, so we skip it.
+            pass
+        else:
+            cleaned_lines.append(line)
+            
+    cleaned_caption = '\n'.join(cleaned_lines).strip()
+    return cleaned_caption, InlineKeyboardMarkup(buttons) if buttons else None
 
 # --- Main search function ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -123,7 +134,7 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         else: await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=reply_markup)
         return
 
-    # --- Step 2: Search persistent private index with new parser ---
+    # --- Step 2: Search persistent private index ---
     if user_lang_code:
         index_key = f"{query}_{user_lang_code}"
         movie_index = context.bot_data.get('movie_index', {})
@@ -131,15 +142,18 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if movie_data_from_index:
             file_id, file_type, original_caption = movie_data_from_index.get("file_id"), movie_data_from_index.get("file_type"), movie_data_from_index.get("original_caption", "")
             
-            # Use the new advanced parser to get clean caption and buttons
-            final_caption, reply_markup = parse_private_post(original_caption)
+            # Remove the indexing tags first
+            base_cleaned_caption = '\n'.join([line for line in original_caption.split('\n') if '#Title' not in line and '#Lang' not in line]).strip()
+            
+            # NEW: Generate final caption and buttons from the remaining text
+            final_caption, reply_markup = create_url_buttons_from_caption(base_cleaned_caption)
 
-            logger.info(f"Found in persistent index! Re-sending '{index_key}' with auto-buttons.")
+            logger.info(f"Found in persistent index! Re-sending '{index_key}'.")
             try:
                 if file_type == "photo": await context.bot.send_photo(chat_id=user_id, photo=file_id, caption=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
                 elif file_type == "video": await context.bot.send_video(chat_id=user_id, video=file_id, caption=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
                 elif file_type == "document": await context.bot.send_document(chat_id=user_id, document=file_id, caption=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
-                else: await context.bot.send_message(chat_id=user_id, text=final_caption, parse_mode='Markdown', reply_markup=reply_markup)
+                else: await context.bot.send_message(chat_id=user_id, text=final_caption, parse_mode='Markdown', reply_markup=reply_markup) # Handles text posts
                 return
             except Exception as e:
                 logger.error(f"Failed to re-send message from persistent index: {e}")
@@ -175,9 +189,11 @@ async def search_tmdb(query: str, region: str | None = None, lang_code: str | No
         logger.error(f"TMDB search failed: {e}")
         return None
 
-# --- Error Handler & Main function with persistence (Unchanged) ---
+# --- Error Handler (Unchanged) ---
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.warning('Update "%s" caused error "%s"', update, context.error)
+
+# --- Main function with persistence (Unchanged) ---
 def main() -> None:
     if not all([TELEGRAM_TOKEN, TMDB_API_KEY, PRIVATE_CHANNEL_ID]):
         logger.error("One or more required environment variables are missing!")
