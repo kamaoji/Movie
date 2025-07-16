@@ -1,4 +1,4 @@
-# bot.py (Version 19 - Final Polish: Delete User's Message Too)
+# bot.py (Version 20 - Final, Warning-Free Version)
 
 import os
 import logging
@@ -34,25 +34,19 @@ def get_more_languages_keyboard():
     keyboard = [[InlineKeyboardButton("Tamil", callback_data='lang_ta'), InlineKeyboardButton("Telugu", callback_data='lang_te')], [InlineKeyboardButton("Spanish", callback_data='lang_es'), InlineKeyboardButton("French", callback_data='lang_fr')], [InlineKeyboardButton("« Back", callback_data='back_to_main')]]
     return InlineKeyboardMarkup(keyboard)
 
-# --- MODIFIED: Deletion function now also accepts user_message_id ---
+# --- Deletion function ---
 async def schedule_message_deletion(context: ContextTypes.DEFAULT_TYPE, chat_id: int, bot_message_id: int, user_message_id: int, user_name: str, delay: int = 60):
-    """Schedules the bot's message AND the user's message to be deleted."""
     await asyncio.sleep(delay)
     try:
-        # Delete the bot's message first
         await context.bot.delete_message(chat_id=chat_id, message_id=bot_message_id)
-        logger.info(f"Auto-deleted bot message {bot_message_id} in chat {chat_id}.")
-        
-        # NEW: Delete the user's original message
         await context.bot.delete_message(chat_id=chat_id, message_id=user_message_id)
-        logger.info(f"Auto-deleted user message {user_message_id} in chat {chat_id}.")
-        
+        logger.info(f"Auto-deleted messages in chat {chat_id}.")
         confirmation_text = f"Hey {user_name},\n\nYour previous request has been deleted to avoid clutter. 👍"
         await context.bot.send_message(chat_id=chat_id, text=confirmation_text)
     except Exception as e:
         logger.warning(f"Could not delete one or both messages in chat {chat_id}: {e}")
 
-# --- Bot Handlers (Start & Button) ---
+# --- Bot Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     welcome_message = f"Hey {user.first_name}! 👋 Welcome to the Ultimate Movie Bot! 🎬\n\nMy responses & your requests will be deleted after 1 minute!\n\nChoose your preferred language below. 👇"
@@ -70,7 +64,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lang_name = LANGUAGE_DATA.get(lang_code, {}).get('name', 'selected language')
         await query.edit_message_text(text=f"✅ Great! Your preferred language is now permanently set to *{lang_name}*.\n\nSend me any movie title to search!", parse_mode='Markdown')
 
-# --- Indexing function ---
+# --- MODIFIED: Indexing function with reaction code removed ---
 async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.channel_post or str(update.channel_post.chat.id) != PRIVATE_CHANNEL_ID: return
     post = update.channel_post
@@ -87,10 +81,7 @@ async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         elif post.text: file_type = "text"
         context.bot_data.setdefault('movie_index', {})[index_key] = {"file_id": file_id, "file_type": file_type, "original_caption": caption}
         logger.info(f"Persistently Indexed: Key='{index_key}', Type='{file_type}'")
-        try:
-            await context.bot.add_reaction(chat_id=PRIVATE_CHANNEL_ID, message_id=post.message_id, reaction="👍")
-        except Exception as e:
-            logger.warning(f"Could not react to message: {e}")
+        # The reaction code that caused the warning has been removed.
 
 # --- Helper for URL buttons ---
 def create_url_buttons_from_caption(caption: str) -> (str, InlineKeyboardMarkup | None):
@@ -108,7 +99,7 @@ def create_url_buttons_from_caption(caption: str) -> (str, InlineKeyboardMarkup 
 # --- Main search function ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    user_message_id = update.message.message_id # Get the ID of the user's message
+    user_message_id = update.message.message_id
     query = update.message.text.lower().strip()
     user_lang_code = context.user_data.get('language')
     deletion_warning = "\n\n\n*⚠️ This message & your request will automatically delete in 1 minute!*"
@@ -138,7 +129,6 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     logger.error(f"Failed to re-send message from index: {e}"); await update.message.reply_text("I found the movie in my library, but couldn't send it.")
 
     if sent_message:
-        # Schedule the deletion of BOTH messages
         asyncio.create_task(schedule_message_deletion(context, sent_message.chat_id, sent_message.message_id, user_message_id, user.first_name))
     elif not tmdb_data:
         await update.message.reply_text("Movie not found in TMDB or my private library for the selected language.")
