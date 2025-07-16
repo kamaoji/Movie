@@ -1,4 +1,4 @@
-# bot.py (Version 12 - Final Bug Fix & Clean Formatting)
+# bot.py (Version 13 - Clean Private Channel Output)
 
 import os
 import logging
@@ -7,25 +7,30 @@ import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
-# --- Configuration & Logging ---
+# --- Configuration ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 PRIVATE_CHANNEL_ID = os.environ.get("PRIVATE_CHANNEL_ID")
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# --- Logging Setup ---
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# --- In-Memory Index ---
-movie_index = {}
+# --- In-Memory Index (MODIFIED STRUCTURE) ---
+# Now stores file_id, file_type, and original_caption for re-sending
+movie_index = {} # Example: {"title_lang": {"file_id": "...", "file_type": "photo", "original_caption": "..."}}
 
-# --- Language and Button Data ---
+# --- Language and Button Data (Unchanged) ---
 LANGUAGE_DATA = {
     'en': {'name': 'English', 'region': 'US'}, 'hi': {'name': 'Hindi', 'region': 'IN'},
     'ta': {'name': 'Tamil', 'region': 'IN'}, 'te': {'name': 'Telugu', 'region': 'IN'},
     'es': {'name': 'Spanish', 'region': 'ES'}, 'fr': {'name': 'French', 'region': 'FR'},
 }
 
-# --- Button Keyboard Helpers ---
+# --- Button Keyboard Helpers (Unchanged) ---
 def get_main_menu_keyboard():
     keyboard = [[InlineKeyboardButton("🇮🇳 Hindi", callback_data='lang_hi'), InlineKeyboardButton("🇬🇧 English", callback_data='lang_en')], [InlineKeyboardButton("More Languages 🌍", callback_data='show_more_langs')]]
     return InlineKeyboardMarkup(keyboard)
@@ -34,7 +39,7 @@ def get_more_languages_keyboard():
     keyboard = [[InlineKeyboardButton("Tamil", callback_data='lang_ta'), InlineKeyboardButton("Telugu", callback_data='lang_te')], [InlineKeyboardButton("Spanish", callback_data='lang_es'), InlineKeyboardButton("French", callback_data='lang_fr')], [InlineKeyboardButton("« Back", callback_data='back_to_main')]]
     return InlineKeyboardMarkup(keyboard)
 
-# --- Start and Button Handlers ---
+# --- Start and Button Handlers (Unchanged) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     welcome_message = f"Hey {user.first_name}! 👋 Welcome to the Ultimate Movie Bot! 🎬\n\nI can now search my own private library for you!\n\nChoose your preferred language below to get tailored results! 👇"
@@ -54,27 +59,44 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lang_name = LANGUAGE_DATA.get(lang_code, {}).get('name', 'selected language')
         await query.edit_message_text(text=f"✅ Great! Your preferred language is set to *{lang_name}*.\n\nNow, send me any movie title to search!", parse_mode='Markdown')
 
-# --- Indexing function with robust regex ---
+# --- MODIFIED: Indexing function now stores more data ---
 async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # This function is now correct from the previous version
     if not update.channel_post or str(update.channel_post.chat.id) != PRIVATE_CHANNEL_ID: return
     caption = update.channel_post.caption
-    if not caption: return
+    
     title_match = re.search(r'#Title\s+([^\n]+)', caption, re.IGNORECASE)
     lang_match = re.search(r'#Lang\s+([a-zA-Z]{2})', caption, re.IGNORECASE)
+    
     if title_match and lang_match:
         title = title_match.group(1).strip().lower()
         lang = lang_match.group(1).strip().lower()
-        message_id = update.channel_post.message_id
+        message_id = update.channel_post.message_id # Keep message_id for logging/debug
         index_key = f"{title}_{lang}"
-        movie_index[index_key] = message_id
-        logger.info(f"Successfully Indexed: Key='{index_key}', Message ID='{message_id}'")
+
+        file_id = None
+        file_type = None
+        if update.channel_post.photo:
+            file_id = update.channel_post.photo[-1].file_id # Get the largest photo
+            file_type = "photo"
+        elif update.channel_post.video:
+            file_id = update.channel_post.video.file_id
+            file_type = "video"
+        elif update.channel_post.document: # Handle documents (like .mp4 files if not video type)
+            file_id = update.channel_post.document.file_id
+            file_type = "document"
+
+        movie_index[index_key] = {
+            "file_id": file_id,
+            "file_type": file_type,
+            "original_caption": caption # Store the entire original caption
+        }
+        logger.info(f"Successfully Indexed: Key='{index_key}', Type='{file_type}', Message ID='{message_id}'")
         try:
             await context.bot.add_reaction(chat_id=PRIVATE_CHANNEL_ID, message_id=message_id, reaction="👍")
         except Exception as e:
             logger.warning(f"Could not react to message (check permissions): {e}")
 
-# --- Main search function ---
+# --- MODIFIED: Main search function to re-send from private index ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.message.text.lower().strip()
     user_id = update.effective_user.id
@@ -85,14 +107,13 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     tmdb_data = await search_tmdb(query, region=region, lang_code=user_lang_code)
 
     if tmdb_data:
-        # --- NEW & FIXED: Format TMDB posts to your desired style ---
+        # TMDB output format (unchanged, already clean)
         caption = (
             f"🎬 *{tmdb_data['title']}*\n\n"
             f"⭐ *TMDB Rating:* {tmdb_data['rating']}\n"
             f"🎭 *Genre:* {tmdb_data['genre']}\n"
             f"🌐 *Language:* {tmdb_data['language']}\n"
             f"🕒 *Runtime:* {tmdb_data['runtime']}\n"
-            # BUG FIX: Use the correct variable name 'tmdb_data' here
             f"📅 *Release Date:* {tmdb_data['release_date']}"
         )
         
@@ -107,18 +128,40 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=reply_markup)
         return
 
-    # --- Step 2: Search private index ---
+    # --- Step 2: Search private index (MODIFIED to re-send, not forward) ---
     if user_lang_code:
         index_key = f"{query}_{user_lang_code}"
-        message_id_to_forward = movie_index.get(index_key)
-        if message_id_to_forward:
-            logger.info(f"Found in private index! Forwarding message ID: {message_id_to_forward}")
+        movie_data_from_index = movie_index.get(index_key)
+
+        if movie_data_from_index:
+            file_id = movie_data_from_index.get("file_id")
+            file_type = movie_data_from_index.get("file_type")
+            original_caption = movie_data_from_index.get("original_caption", "")
+
+            # --- Clean the caption: remove #Title and #Lang lines/tags ---
+            cleaned_caption_lines = []
+            for line in original_caption.split('\n'):
+                # Skip lines containing these tags for cleaner output
+                if '#Title' in line or '#Lang' in line:
+                    continue
+                cleaned_caption_lines.append(line)
+            cleaned_caption = '\n'.join(cleaned_caption_lines).strip()
+
+            logger.info(f"Found in private index! Re-sending '{index_key}'.")
             try:
-                await context.bot.forward_message(chat_id=user_id, from_chat_id=PRIVATE_CHANNEL_ID, message_id=message_id_to_forward)
-                return
+                # Send based on file type
+                if file_id and file_type == "photo":
+                    await context.bot.send_photo(chat_id=user_id, photo=file_id, caption=cleaned_caption, parse_mode='Markdown')
+                elif file_id and file_type == "video":
+                    await context.bot.send_video(chat_id=user_id, video=file_id, caption=cleaned_caption, parse_mode='Markdown')
+                elif file_id and file_type == "document":
+                     await context.bot.send_document(chat_id=user_id, document=file_id, caption=cleaned_caption, parse_mode='Markdown')
+                else: # Fallback for text-only posts or if media type isn't handled
+                    await context.bot.send_message(chat_id=user_id, text=cleaned_caption, parse_mode='Markdown')
+                return # Success!
             except Exception as e:
-                logger.error(f"Failed to forward message: {e}")
-                await update.message.reply_text("I found the movie, but couldn't forward it. Check my admin permissions.")
+                logger.error(f"Failed to re-send message from private index: {e}")
+                await update.message.reply_text("I found the movie in my library, but couldn't send it. There might be an issue with the post content or my permissions.")
                 return
 
     # --- Step 3: If all fails ---
