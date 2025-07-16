@@ -1,4 +1,4 @@
-# bot.py (Version 17 - TMDB Photo Workaround for Private Posts)
+# bot.py (Version 18 - FINAL - Private Channel First Logic)
 
 import os
 import logging
@@ -58,7 +58,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lang_name = LANGUAGE_DATA.get(lang_code, {}).get('name', 'selected language')
         await query.edit_message_text(text=f"✅ Great! Your preferred language is set to *{lang_name}*.\n\nNow, send me any movie title to search!", parse_mode='Markdown')
 
-# --- Indexing function (Unchanged from Version 16) ---
+# --- Indexing function (Unchanged from Version 17) ---
 async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.channel_post or str(update.channel_post.chat.id) != PRIVATE_CHANNEL_ID: return
     caption = update.channel_post.caption
@@ -82,18 +82,55 @@ async def update_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception as e:
             logger.warning(f"Could not react to message (check permissions): {e}")
 
-# --- MODIFIED: Main search function with TMDB Photo Workaround ---
+# --- MODIFIED: Main search function with CORRECTED logic (Private Channel First) ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.message.text.lower().strip()
     user_id = update.effective_user.id
     user_lang_code = context.user_data.get('language')
 
-    # --- Step 1: Try TMDB ---
+    # --- Step 1: Search private index FIRST ---
+    if user_lang_code:
+        index_key = f"{query}_{user_lang_code}"
+        movie_data_from_index = movie_index.get(index_key)
+
+        if movie_data_from_index:
+            original_caption = movie_data_from_index.get("original_caption", "")
+            
+            # Clean the caption
+            cleaned_caption_lines = []
+            for line in original_caption.split('\n'):
+                if '#Title' in line or '#Lang' in line or '#Button' in line: continue
+                cleaned_caption_lines.append(line)
+            cleaned_caption = '\n'.join(cleaned_caption_lines).strip()
+
+            # Create custom buttons
+            reply_markup = None
+            stored_buttons = movie_data_from_index.get("buttons", [])
+            if stored_buttons:
+                keyboard = []
+                for btn_data in stored_buttons:
+                    keyboard.append([InlineKeyboardButton(btn_data['text'], url=btn_data['url'])])
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+            # Get a poster from TMDB to use with our custom data
+            poster_url_from_tmdb = await get_tmdb_poster_only(query)
+
+            logger.info(f"Found in private index! Re-sending '{index_key}' with TMDB poster.")
+            try:
+                if poster_url_from_tmdb:
+                    await context.bot.send_photo(chat_id=user_id, photo=poster_url_from_tmdb, caption=cleaned_caption, reply_markup=reply_markup)
+                else:
+                    await context.bot.send_message(chat_id=user_id, text=cleaned_caption, reply_markup=reply_markup)
+                return # IMPORTANT: Exit after successfully sending from private index
+            except Exception as e:
+                logger.error(f"Failed to re-send message from private index: {e}")
+                # Don't return, let it fall through to TMDB search as a backup
+    
+    # --- Step 2: If not in private index, try TMDB as a fallback ---
     region = LANGUAGE_DATA.get(user_lang_code, {}).get('region') if user_lang_code else None
     tmdb_data = await search_tmdb(query, region=region, lang_code=user_lang_code)
 
     if tmdb_data:
-        # TMDB output format (unchanged)
         caption = (f"🎬 *{tmdb_data['title']}*\n\n"
                    f"⭐ *TMDB Rating:* {tmdb_data['rating']}\n"
                    f"🎭 *Genre:* {tmdb_data['genre']}\n"
@@ -110,51 +147,11 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=reply_markup)
         return
 
-    # --- Step 2: Search private index (MODIFIED with TMDB Photo Workaround) ---
-    if user_lang_code:
-        index_key = f"{query}_{user_lang_code}"
-        movie_data_from_index = movie_index.get(index_key)
-
-        if movie_data_from_index:
-            original_caption = movie_data_from_index.get("original_caption", "")
-            
-            # --- Clean the caption: remove #Title, #Lang, and #Button lines ---
-            cleaned_caption_lines = []
-            for line in original_caption.split('\n'):
-                if '#Title' in line or '#Lang' in line or '#Button' in line: continue
-                cleaned_caption_lines.append(line)
-            cleaned_caption = '\n'.join(cleaned_caption_lines).strip()
-
-            # --- Create custom buttons ---
-            reply_markup = None
-            stored_buttons = movie_data_from_index.get("buttons", [])
-            if stored_buttons:
-                keyboard = []
-                for btn_data in stored_buttons:
-                    keyboard.append([InlineKeyboardButton(btn_data['text'], url=btn_data['url'])])
-                reply_markup = InlineKeyboardMarkup(keyboard)
-
-            # --- NEW: Get a poster from TMDB to use with our custom data ---
-            poster_url_from_tmdb = await get_tmdb_poster_only(query)
-
-            logger.info(f"Found in private index! Re-sending '{index_key}' with TMDB poster.")
-            try:
-                if poster_url_from_tmdb:
-                    # Send the TMDB photo with our custom caption and buttons
-                    await context.bot.send_photo(chat_id=user_id, photo=poster_url_from_tmdb, caption=cleaned_caption, reply_markup=reply_markup)
-                else:
-                    # If no poster is found, send the custom text and buttons
-                    await context.bot.send_message(chat_id=user_id, text=cleaned_caption, reply_markup=reply_markup)
-                return 
-            except Exception as e:
-                logger.error(f"Failed to re-send message from private index: {e}")
-                await update.message.reply_text("I found the movie in my library, but couldn't send it. There might be an issue with the post content or my permissions.")
-                return
-
     # --- Step 3: If all fails ---
-    await update.message.reply_text("Movie not found in TMDB or my private library for the selected language.")
+    await update.message.reply_text("Movie not found in my private library or on TMDB.")
 
-# --- NEW: Helper function to get ONLY the poster URL from TMDB ---
+
+# --- Helper functions (Unchanged) ---
 async def get_tmdb_poster_only(query: str) -> str | None:
     try:
         headers = {"accept": "application/json", "Authorization": f"Bearer {TMDB_API_KEY}"}
@@ -171,9 +168,7 @@ async def get_tmdb_poster_only(query: str) -> str | None:
         logger.error(f"TMDB poster-only search failed: {e}")
         return None
 
-# --- search_tmdb function (Unchanged) ---
 async def search_tmdb(query: str, region: str | None = None, lang_code: str | None = None) -> dict | None:
-    # This is still needed for the primary search path
     try:
         headers = {"accept": "application/json", "Authorization": f"Bearer {TMDB_API_KEY}"}
         search_url = f"https://api.themoviedb.org/3/search/movie?query={query}&include_adult=false&language=en-US&page=1"
