@@ -1,4 +1,4 @@
-# bot.py (Version 21 - Final Polish: Delete "Not Found" Messages)
+# bot.py (Version 22 - The Ultimate: Total Deletion)
 
 import os
 import logging
@@ -34,15 +34,31 @@ def get_more_languages_keyboard():
     keyboard = [[InlineKeyboardButton("Tamil", callback_data='lang_ta'), InlineKeyboardButton("Telugu", callback_data='lang_te')], [InlineKeyboardButton("Spanish", callback_data='lang_es'), InlineKeyboardButton("French", callback_data='lang_fr')], [InlineKeyboardButton("« Back", callback_data='back_to_main')]]
     return InlineKeyboardMarkup(keyboard)
 
-# --- Deletion Function ---
+# --- NEW: A separate function to delete the final confirmation message ---
+async def schedule_final_cleanup(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, delay: int = 10):
+    """Deletes the final confirmation message after a short delay."""
+    await asyncio.sleep(delay)
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        logger.info(f"Final cleanup: Deleted confirmation message {message_id} in chat {chat_id}.")
+    except Exception as e:
+        logger.warning(f"Could not perform final cleanup for message {message_id}: {e}")
+
+# --- MODIFIED: The main deletion function now schedules the final cleanup ---
 async def schedule_message_deletion(context: ContextTypes.DEFAULT_TYPE, chat_id: int, bot_message_id: int, user_message_id: int, user_name: str, delay: int = 60):
+    """Deletes the main messages and then schedules its own confirmation message for deletion."""
     await asyncio.sleep(delay)
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=bot_message_id)
         await context.bot.delete_message(chat_id=chat_id, message_id=user_message_id)
-        logger.info(f"Auto-deleted messages in chat {chat_id}.")
+        logger.info(f"Auto-deleted main messages in chat {chat_id}.")
+        
         confirmation_text = f"Hey {user_name},\n\nYour previous request has been deleted to avoid clutter. 👍"
-        await context.bot.send_message(chat_id=chat_id, text=confirmation_text)
+        confirmation_message = await context.bot.send_message(chat_id=chat_id, text=confirmation_text)
+        
+        # NEW: Schedule the deletion of this confirmation message
+        asyncio.create_task(schedule_final_cleanup(context, confirmation_message.chat_id, confirmation_message.message_id))
+        
     except Exception as e:
         logger.warning(f"Could not delete messages in chat {chat_id}: {e}")
 
@@ -95,7 +111,7 @@ def create_url_buttons_from_caption(caption: str) -> (str, InlineKeyboardMarkup 
         else: cleaned_lines.append(line)
     return '\n'.join(cleaned_lines).strip(), InlineKeyboardMarkup(buttons) if buttons else None
 
-# --- MODIFIED: Main search function with complete deletion logic ---
+# --- Main search function ---
 async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     user_message_id = update.message.message_id
@@ -104,12 +120,10 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     deletion_warning = "\n\n\n*⚠️ This message & your request will automatically delete in 1 minute!*"
     sent_message = None
 
-    # --- Step 1: Search private channel FIRST ---
     if user_lang_code:
         index_key = f"{query}_{user_lang_code}"
         movie_data = context.bot_data.get('movie_index', {}).get(index_key)
         if movie_data:
-            logger.info(f"Found in private index! Sending '{index_key}'.")
             final_caption, reply_markup = create_url_buttons_from_caption('\n'.join([line for line in movie_data["original_caption"].split('\n') if '#Title' not in line and '#Lang' not in line]).strip())
             final_caption += deletion_warning
             try:
@@ -120,9 +134,7 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             except Exception as e:
                 logger.error(f"Failed to re-send message from index: {e}")
     
-    # --- Step 2: Try TMDB as a fallback ---
     if not sent_message:
-        logger.info(f"Not found in private index. Falling back to TMDB for '{query}'.")
         region = LANGUAGE_DATA.get(user_lang_code, {}).get('region') if user_lang_code else None
         tmdb_data = await search_tmdb(query, region=region, lang_code=user_lang_code)
         if tmdb_data:
@@ -132,13 +144,10 @@ async def search_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             if tmdb_data.get('poster_url'): sent_message = await update.message.reply_photo(photo=tmdb_data['poster_url'], caption=caption, parse_mode='Markdown', reply_markup=reply_markup)
             else: sent_message = await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=reply_markup)
 
-    # --- Step 3: Schedule deletion OR handle "not found" ---
     if sent_message:
         asyncio.create_task(schedule_message_deletion(context, sent_message.chat_id, sent_message.message_id, user_message_id, user.first_name))
     else:
-        # --- NEW LOGIC FOR "NOT FOUND" ---
         not_found_message = await update.message.reply_text("Movie not found in my private library or on TMDB for the selected language.")
-        # Schedule the deletion for the "not found" message as well
         asyncio.create_task(schedule_message_deletion(context, not_found_message.chat_id, not_found_message.message_id, user_message_id, user.first_name))
 
 # --- search_tmdb function ---
